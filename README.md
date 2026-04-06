@@ -34,11 +34,31 @@ Per the nanochat README, it prefers using uv package manager:
 Nanochat is meant for training, so using pretrained weights is a little complicated. I chose weights from https://huggingface.co/sdobson/nanochat because Karpathy's weights from https://huggingface.co/karpathy/nanochat-d32/tree/main were too large.
 
 In your GCP VM:
-- pip install huggingface_hub
-- huggingface-cli download sdobson/nanochat model_000650.pt --local-dir ~/.cache/nanochat/chatsft_checkpoints/d20
-- huggingface-cli download sdobson/nanochat meta_000650.json --local-dir ~/.cache/nanochat/chatsft_checkpoints/d20
-- huggingface-cli download sdobson/nanochat tokenizer.pkl --local-dir ~/.cache/nanochat/tokenizer
-- huggingface-cli download sdobson/nanochat token_bytes.pt --local-dir ~/.cache/nanochat/tokenizer
+```
+pip install huggingface_hub
+
+huggingface-cli download sdobson/nanochat model_000650.pt --local-dir ~/.cache/nanochat/chatsft_checkpoints/d20
+
+huggingface-cli download sdobson/nanochat meta_000650.json --local-dir ~/.cache/nanochat/chatsft_checkpoints/d20
+
+huggingface-cli download sdobson/nanochat tokenizer.pkl --local-dir ~/.cache/nanochat/tokenizer
+
+huggingface-cli download sdobson/nanochat token_bytes.pt --local-dir ~/.cache/nanochat/tokenizer
+```
 
 ## Running for inferencing
-NANOCHAT_DTYPE=bfloat16 python -m scripts.chat_cli --model-tag d20
+`NANOCHAT_DTYPE=bfloat16 python -m scripts.chat_cli --model-tag d20`
+
+## Fine-tuning
+As an intermediate step before introducing image embeddings, we can fine-tune nanochat on text. The following setup achieves this using nanochat's base_train.py script. This is slightly confusing because nanochat uses "pretraining" to mean next token prediction, which is trained with scripts/base_train.py. "Fine-tuning" refers to using conversational data like JSONL conversations, which is trained with chat_sft.py. So even though we "fine-tune" a model in a traditional sense of using pre-trained weights and slightly improving them, we use base_train.py for this in nanochat
+- Download 1 partition of training data: from multimodal-nanochat/nanochat: `python -m nanochat.dataset -n 1`. This downloads training data into ~/.cache/nanochat/base_data_climbmix
+- The following command trains for 10 iterations and then evaluates on many different test sets:
+```
+TORCH_COMPILE_DISABLE=1 NANOCHAT_DTYPE=bfloat16 python -m scripts.base_train \
+    --model-tag d20 \
+    --num-iterations 10 \
+    --device-batch-size 1 \
+    --total-batch-size 512 \
+    --max-seq-len 512 \
+    --eval-every 0
+    ```
