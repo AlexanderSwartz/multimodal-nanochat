@@ -14,6 +14,7 @@ import argparse
 import os
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 import time
+import glob
 import wandb
 import torch
 from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, get_base_dir, autodetect_device_type, get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized
@@ -200,6 +201,9 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
     assert dataset_size > 0
     row_capacity = args.max_seq_len + 1  # +1 for target at last position
     bos_token = tokenizer.get_bos_token_id()
+    # If set, enforce that image-conditioned examples must contain a valid embedding file.
+    # Useful for debugging dataset/embedding mismatches: set NANOCHAT_STRICT_IMAGE_EMBEDDINGS=1
+    strict_image_embeddings = os.environ.get("NANOCHAT_STRICT_IMAGE_EMBEDDINGS", "0").lower() in ("1", "true", "yes")
 
     # Conversation buffer: list of (token_ids, loss_mask) tuples
     conv_buffer = []
@@ -210,10 +214,82 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
 
     def refill_buffer():
         nonlocal cursor, epoch
+        # Prepare a default image embedding shape by inspecting existing saved embeddings.
+        # This avoids failures when mixing non-image tasks into the training mixture.
+        default_image_emb = None
+        try:
+            emb_files = glob.glob("COCO_data/embeddings/*.pt")
+            for ef in emb_files:
+                try:
+                    t = torch.load(ef, map_location="cpu")
+                except Exception:
+                    continue
+                if t.dim() == 3 and t.shape[0] == 1:
+                    t = t.squeeze(0)
+                if t.dim() == 2:
+                    default_image_emb = t
+                    break
+        except Exception:
+            default_image_emb = None
+        if default_image_emb is None:
+            # Fallback to a reasonable default: 50 tokens x 768 dims (CLIP ViT-B/32 typical)
+            default_image_emb = torch.zeros((50, 768), dtype=torch.float32)
         while len(conv_buffer) < buffer_size:
             conversation = dataset[cursor]
             ids, mask = tokenizer.render_conversation(conversation)
-            conv_buffer.append((ids, mask))
+            
+            # --- NANOCHAT_V ---
+            # Guard against empty/malformed dataset rows
+            if not ids:
+                cursor += ddp_world_size
+                continue
+                
+            # --- ROBUST MULTIMODAL INJECTION ---
+            img_id = conversation.get('image_id') # Ensure your dataset dict has this key
+
+            # Load the tensor and ensure it's on CPU for the dataloader.
+            # If strict mode is enabled, raise a helpful error when image_id is
+            # missing or the embedding file cannot be found. Otherwise fall back
+            # to a default zero embedding to allow mixing non-image tasks.
+            if img_id is None:
+                if strict_image_embeddings:
+                    raise ValueError(f"Conversation at dataset index {cursor} is missing 'image_id'.\n"
+                                     "Either add 'image_id' to this conversation or disable strict mode by unsetting "
+                                     "NANOCHAT_STRICT_IMAGE_EMBEDDINGS.")
+                image_emb = default_image_emb.clone()
+            else:
+                emb_path = f"COCO_data/embeddings/{img_id}.pt"
+                if not os.path.exists(emb_path):
+                    if strict_image_embeddings:
+                        raise FileNotFoundError(
+                            f"Embedding file not found: {emb_path}\n"
+                            "Run the CLIP_COCO_loader.ipynb to generate embeddings at COCO_data/embeddings/{image_id}.pt"
+                        )
+                    print0(f"Warning: embedding file {emb_path} not found; using default embedding")
+                    image_emb = default_image_emb.clone()
+                else:
+                    image_emb = torch.load(emb_path, map_location="cpu")
+                    # Standardize shape to (seq_len, n_embd) in case the saved tensor has a batch dim of 1
+                    if image_emb.dim() == 3 and image_emb.shape[0] == 1:
+                        image_emb = image_emb.squeeze(0)
+
+            # Ensure 2D shape (num_img_tokens, dim)
+            if image_emb.dim() == 1:
+                image_emb = image_emb.unsqueeze(0)
+            num_img_tokens = image_emb.shape[0]
+
+            # Pop the <|bos|> token off the front safely
+            bos_id = ids.pop(0)
+            bos_mask = mask.pop(0)
+
+            # Rebuild the lists using bos_id as the safe, valid placeholder!
+            ids = [bos_id] + ([bos_id] * num_img_tokens) + ids
+            mask = [bos_mask] + ([0] * num_img_tokens) + mask
+            # ------------------------------------------
+
+            # Append 3 items now: ids, mask, and the actual image tensor
+            conv_buffer.append((ids, mask, image_emb))
+            
             cursor += ddp_world_size
             if cursor >= dataset_size:
                 cursor = cursor % dataset_size
@@ -223,86 +299,53 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
     while True:
         rows = []
         mask_rows = []
-        row_lengths = []  # Track actual content length (excluding padding) for each row
+        img_rows = []  # NEW: Array to hold exactly one image per batch row
+
         for _ in range(args.device_batch_size):
-            row = []
-            mask_row = []
-            padded = False
-            while len(row) < row_capacity:
-                # Ensure buffer has conversations
-                while len(conv_buffer) < buffer_size:
-                    refill_buffer()
+            # Ensure buffer has conversations
+            while len(conv_buffer) < buffer_size:
+                refill_buffer()
 
-                remaining = row_capacity - len(row)
+            # 1. Pop EXACTLY ONE conversation from the buffer
+            # (This safely disables the multi-conversation packing algorithm)
+            conv_ids, conv_mask, img_emb = conv_buffer.pop(0)
 
-                # Find largest conversation that fits entirely
-                best_idx = -1
-                best_len = 0
-                for i, (conv, _) in enumerate(conv_buffer):
-                    conv_len = len(conv)
-                    if conv_len <= remaining and conv_len > best_len:
-                        best_idx = i
-                        best_len = conv_len
+            # 2. Truncate if the caption + image somehow exceeds max sequence length
+            if len(conv_ids) > row_capacity:
+                conv_ids = conv_ids[:row_capacity]
+                conv_mask = conv_mask[:row_capacity]
 
-                if best_idx >= 0:
-                    # Found a conversation that fits - use it entirely
-                    conv, conv_mask = conv_buffer.pop(best_idx)
-                    row.extend(conv)
-                    mask_row.extend(conv_mask)
-                    consumed += ddp_world_size  # Track actual consumption
-                else:
-                    # No conversation fits - pad the remainder instead of cropping
-                    # This ensures we never discard any tokens
-                    content_len = len(row)
-                    row.extend([bos_token] * remaining)  # Pad with BOS tokens
-                    mask_row.extend([0] * remaining)
-                    padded = True
-                    break  # Row is now full (with padding)
+            row = list(conv_ids)
+            mask_row = list(conv_mask)
 
-            # Track content length: full row if no padding, otherwise the length before padding
-            if padded:
-                row_lengths.append(content_len)
-            else:
-                row_lengths.append(row_capacity)
-            rows.append(row[:row_capacity])
-            mask_rows.append(mask_row[:row_capacity])
+            # 3. Pad the remainder of the row to match row_capacity
+            remaining = row_capacity - len(row)
+            if remaining > 0:
+                row.extend([bos_token] * remaining)
+                mask_row.extend([0] * remaining)  # Pad mask with 0 so it's ignored in loss
 
-        # Stopping condition to respect num_iterations, if given
-        it += 1
-        if 0 < args.num_iterations <= it and split == "train":
-            last_step = True
+            rows.append(row)
+            mask_rows.append(mask_row)
+            img_rows.append(img_emb)  # Store the image tensor
 
-        # Update progress tracking (based on consumed, not cursor, to account for buffering)
-        if split == "train":
-            current_epoch = epoch
-            if args.num_iterations > 0:
-                approx_progress = it / args.num_iterations
-            else:
-                approx_progress = consumed / dataset_size
-            # Trigger last_step when we've consumed enough (instead of when cursor wraps)
-            if consumed >= dataset_size:
-                last_step = True
+        # --- TENSOR CREATION (Exact nanochat logic) ---
+        inputs = torch.tensor(rows, dtype=torch.long, device=device)
+        targets = torch.tensor(rows, dtype=torch.long, device=device)
+        mask_tensor = torch.tensor(mask_rows, dtype=torch.long, device=device)
 
-        # Build tensors
-        use_cuda = device_type == "cuda"
-        batch_tensor = torch.tensor(rows, dtype=torch.long, pin_memory=use_cuda)
-        inputs = batch_tensor[:, :-1].to(device=device, dtype=torch.int32, non_blocking=use_cuda).contiguous()
-        targets = batch_tensor[:, 1:].to(device=device, dtype=torch.int64, non_blocking=use_cuda).contiguous()
-
-        # Apply the loss mask from render_conversation (mask=1 for assistant completions,
-        # mask=0 for user prompts, BOS, special tokens, tool outputs). mask[1:] aligns
-        # with targets (shifted by 1). Unmasked positions get -1 (ignore_index).
-        mask_tensor = torch.tensor(mask_rows, dtype=torch.int8)
-        mask_targets = mask_tensor[:, 1:].to(device=device)
+        # Apply the shifted mask to targets
+        mask_targets = mask_tensor[:, 1:]
+        targets = targets[:, 1:]
         targets[mask_targets == 0] = -1
 
-        # Mask out padding positions in targets (set to -1 = ignore_index)
-        # For each row, positions >= (content_length - 1) in targets should be masked
-        for i, content_len in enumerate(row_lengths):
-            if content_len < row_capacity:
-                targets[i, content_len-1:] = -1
+        # Shift inputs
+        inputs = inputs[:, :-1]
 
-        yield inputs, targets
+        # Stack the batch of images into a single tensor and move to GPU
+        image_embeddings = torch.stack(img_rows).to(device)
+
+        # Yield all three components to the training loop!
+        yield inputs, targets, image_embeddings
 
 train_loader = sft_data_generator_bos_bestfit("train")
 build_val_loader = lambda: sft_data_generator_bos_bestfit("val")
@@ -328,7 +371,10 @@ def get_muon_momentum(it):
 
 # -----------------------------------------------------------------------------
 # Training loop
-x, y = next(train_loader) # prefetch the very first batch of data
+# x, y = next(train_loader) # prefetch the very first batch of data
+
+# 
+x, y, img_feats = next(train_loader)
 min_val_bpb = float("inf")
 smooth_train_loss = 0 # EMA of training loss
 ema_beta = 0.9 # EMA decay factor
@@ -430,14 +476,15 @@ while True:
     synchronize()
     t0 = time.time()
     for micro_step in range(grad_accum_steps):
-        loss = model(x, y)
+        # loss = model(x, y)
+        loss = model(x, y, loss_reduction='mean', image_embeddings=img_feats)
         train_loss = loss.detach() # for logging
         loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
         if scaler is not None:
             scaler.scale(loss).backward()
         else:
             loss.backward()
-        x, y = next(train_loader) # prefetch the next batch while the GPU is busy with forward/backward
+        x, y, img_feats = next(train_loader) # prefetch the next batch while the GPU is busy with forward/backward
         progress = max(progress, approx_progress) # only increase progress monotonically
     # step the optimizer
     lrm = get_lr_multiplier(progress)
