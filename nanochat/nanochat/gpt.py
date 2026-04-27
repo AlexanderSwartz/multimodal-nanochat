@@ -421,6 +421,7 @@ class GPT(nn.Module):
             group["initial_lr"] = group["lr"]
         return optimizer
 
+    # idx is the input token ids. Each token has an int id before being embedded, and the targets are the token ids to predict (same shape as idx, but shifted by one position for causal language modeling).
     def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean', image_embeddings=None):
         B, T = idx.size()
 
@@ -433,7 +434,7 @@ class GPT(nn.Module):
         cos_sin = self.cos[:, T0:T0+T], self.sin[:, T0:T0+T] # truncate cache to current sequence length
 
         # Embed the tokens
-        x = self.transformer.wte(idx) # embed current token
+        x = self.transformer.wte(idx) # embed tokens to get (B, T, n_embd)
         x = x.to(COMPUTE_DTYPE) # ensure activations are in compute dtype (no-op usually, but active for fp16 code path)
         x = norm(x)
         
