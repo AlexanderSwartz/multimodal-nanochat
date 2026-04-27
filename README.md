@@ -62,3 +62,8 @@ TORCH_COMPILE_DISABLE=1 NANOCHAT_DTYPE=bfloat16 python -m scripts.base_train \
     --max-seq-len 512 \
     --eval-every 0
     ```
+
+
+## Fine-tuning Nanochat_V
+The following command uses the same pre-trained, d20 weights for nanochat. It then runs chat_sft.py with a small sample of the custom data
+`PYTHONPATH=./nanochat PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True TORCH_COMPILE_DISABLE=1 /home/as7629/multimodal-nanochat/nanochat/.venv/bin/python -u -m scripts.chat_sft   --run dummy   --num-iterations 1   --device-batch-size 1   --total-batch-size 512   --max-seq-len 512   --eval-tokens 512   --eval-every -1   --chatcore-every -1s 1   --device-batch-size 1   --total-batch-size 512   --max-seq-len 512   --eval-tokens 512   --e`
