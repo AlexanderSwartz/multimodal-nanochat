@@ -12,10 +12,16 @@ torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- --device-batch-s
 import gc
 import argparse
 import os
+# Improve CUDA caching allocator configuration to reduce fragmentation.
+# Prefer the CUDA-specific variable; keep the legacy name as a fallback.
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 import time
 import glob
-import wandb
+try:
+    import wandb
+except Exception:
+    wandb = None
 import torch
 from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, get_base_dir, autodetect_device_type, get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized
 from nanochat.tokenizer import get_token_bytes
@@ -67,8 +73,13 @@ parser.add_argument("--chatcore-max-sample", type=int, default=24, help="max pro
 # Data mixture
 parser.add_argument("--mmlu-epochs", type=int, default=3, help="number of epochs of MMLU in training mixture (teaches Multiple Choice)")
 parser.add_argument("--gsm8k-epochs", type=int, default=4, help="number of epochs of GSM8K in training mixture (teaches Math and Tool Use)")
+# Debugging flags
+parser.add_argument("--disable-image", action='store_true', help="Disable using image embeddings during training/eval (text-only debug)")
 args = parser.parse_args()
 user_config = vars(args).copy()
+# Allow disabling image handling via env var as well
+# e.g. export NANOCHAT_DISABLE_IMAGE=1
+disable_image = args.disable_image or os.environ.get("NANOCHAT_DISABLE_IMAGE", "0").lower() in ("1", "true", "yes")
 # -----------------------------------------------------------------------------
 
 # Compute init
@@ -118,7 +129,12 @@ for name, fallback, source in [
         print0(f"Using {name}={arg_val}")
 
 orig_model = model
-model = torch.compile(model, dynamic=False)
+# Allow disabling torch.compile via env var TORCH_COMPILE_DISABLE=1 for debug runs
+compile_disabled = os.environ.get("TORCH_COMPILE_DISABLE", "0").lower() in ("1", "true", "yes")
+if compile_disabled:
+    print0("TORCH_COMPILE_DISABLE set; skipping torch.compile()")
+else:
+    model = torch.compile(model, dynamic=False)
 depth = model.config.n_layer
 num_flops_per_token = model.estimate_flops()
 tokens_per_fwdbwd = args.device_batch_size * args.max_seq_len # tokens per iteration for a single rank
@@ -244,6 +260,17 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
                 cursor += ddp_world_size
                 continue
                 
+            # Determine whether the current dataset row originates from an
+            # image-conditioned task (e.g., CustomJSON). If so, strict image
+            # embedding checks will be enforced when requested.
+            if hasattr(dataset, 'index_map'):
+                task_idx, _ = dataset.index_map[cursor]
+                current_task = dataset.tasks[task_idx]
+            else:
+                current_task = dataset
+
+            is_image_task = isinstance(current_task, CustomJSON)
+
             # --- ROBUST MULTIMODAL INJECTION ---
             img_id = conversation.get('image_id') # Ensure your dataset dict has this key
 
@@ -252,15 +279,21 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
             # missing or the embedding file cannot be found. Otherwise fall back
             # to a default zero embedding to allow mixing non-image tasks.
             if img_id is None:
-                if strict_image_embeddings:
-                    raise ValueError(f"Conversation at dataset index {cursor} is missing 'image_id'.\n"
-                                     "Either add 'image_id' to this conversation or disable strict mode by unsetting "
-                                     "NANOCHAT_STRICT_IMAGE_EMBEDDINGS.")
+                # Only error out for missing image_id if this row is from an
+                # image task and strict mode is enabled. Otherwise fall back to
+                # default embeddings so non-image tasks can be mixed.
+                if strict_image_embeddings and is_image_task:
+                    raise ValueError(
+                        f"Conversation at dataset index {cursor} is missing 'image_id'.\n"
+                        "This dataset row comes from an image task and strict image embedding\n"
+                        "mode is enabled. Add an 'image_id' to this conversation or disable\n"
+                        "strict mode by unsetting NANOCHAT_STRICT_IMAGE_EMBEDDINGS."
+                    )
                 image_emb = default_image_emb.clone()
             else:
                 emb_path = f"COCO_data/embeddings/{img_id}.pt"
                 if not os.path.exists(emb_path):
-                    if strict_image_embeddings:
+                    if strict_image_embeddings and is_image_task:
                         raise FileNotFoundError(
                             f"Embedding file not found: {emb_path}\n"
                             "Run the CLIP_COCO_loader.ipynb to generate embeddings at COCO_data/embeddings/{image_id}.pt"
@@ -394,7 +427,7 @@ while True:
         model.eval()
         val_loader = build_val_loader()
         eval_steps = args.eval_tokens // (args.device_batch_size * args.max_seq_len * ddp_world_size)
-        val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes)
+        val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes, disable_image=disable_image)
         print0(f"Step {step:05d} | Validation bpb: {val_bpb:.4f}")
         if val_bpb < min_val_bpb:
             min_val_bpb = val_bpb
@@ -477,7 +510,10 @@ while True:
     t0 = time.time()
     for micro_step in range(grad_accum_steps):
         # loss = model(x, y)
-        loss = model(x, y, loss_reduction='mean', image_embeddings=img_feats)
+        if disable_image:
+            loss = model(x, y, loss_reduction='mean')
+        else:
+            loss = model(x, y, loss_reduction='mean', image_embeddings=img_feats)
         train_loss = loss.detach() # for logging
         loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
         if scaler is not None:
@@ -510,6 +546,10 @@ while True:
 
     # State
     step += 1
+
+    # Honor --num-iterations to allow quick smoke tests
+    if args.num_iterations > 0 and step >= args.num_iterations:
+        last_step = True
 
     # logging
     smooth_train_loss = ema_beta * smooth_train_loss + (1 - ema_beta) * train_loss.item() # EMA the training loss

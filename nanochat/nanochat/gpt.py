@@ -172,6 +172,10 @@ class GPT(nn.Module):
             "wte": nn.Embedding(padded_vocab_size, config.n_embd),
             "h": nn.ModuleList([Block(config, layer_idx) for layer_idx in range(config.n_layer)]),
         })
+        
+        # nanochat_V
+        self.vision_proj = Linear(768, config.n_embd, bias=False)
+        
         self.lm_head = Linear(config.n_embd, padded_vocab_size, bias=False)
         # Per-layer learnable scalars (inspired by modded-nanogpt)
         # resid_lambdas: scales the residual stream at each layer (init 1.0 = neutral)
@@ -220,7 +224,13 @@ class GPT(nn.Module):
 
         # Transformer blocks: uniform init with bound = sqrt(3) * std (same standard deviation as normal)
         n_embd = self.config.n_embd
+        
+        # nanochat_V
         s = 3**0.5 * n_embd**-0.5 # sqrt(3) multiplier makes sure Uniform achieves the same std as Normal
+        # Initialize vision projection mapping (CLIP_dim -> model n_embd)
+        if hasattr(self, 'vision_proj'):
+            torch.nn.init.uniform_(self.vision_proj.weight, -s, s)
+            
         for block in self.transformer.h:
             torch.nn.init.uniform_(block.attn.c_q.weight, -s, s) # weights use Uniform to avoid outliers
             torch.nn.init.uniform_(block.attn.c_k.weight, -s, s)
@@ -374,6 +384,9 @@ class GPT(nn.Module):
         matrix_params = list(self.transformer.h.parameters())
         value_embeds_params = list(self.value_embeds.parameters())
         embedding_params = list(self.transformer.wte.parameters())
+        # Include vision projection parameters (if present) so optimizer groups sum to all params
+        if hasattr(self, "vision_proj"):
+            embedding_params += list(self.vision_proj.parameters())
         lm_head_params = list(self.lm_head.parameters())
         resid_params = [self.resid_lambdas]
         x0_params = [self.x0_lambdas]
@@ -408,7 +421,7 @@ class GPT(nn.Module):
             group["initial_lr"] = group["lr"]
         return optimizer
 
-    def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean'):
+    def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean', image_embeddings=None):
         B, T = idx.size()
 
         # Grab the rotary embeddings for the current sequence length (they are of shape (1, seq_len, 1, head_dim/2))
@@ -423,6 +436,21 @@ class GPT(nn.Module):
         x = self.transformer.wte(idx) # embed current token
         x = x.to(COMPUTE_DTYPE) # ensure activations are in compute dtype (no-op usually, but active for fp16 code path)
         x = norm(x)
+        
+        # --- NEW MULTIMODAL INJECTION ---
+        # The placeholder approach means you insert fake, dummy tokens (like -1 or a special <image> ID) 
+        # into your text input sequence exactly where you want the image to appear. 
+        # During the forward pass, you intercept the sequence of text embeddings and 
+        # physically overwrite the vectors at those placeholder positions with your actual projected visual vectors.
+        if image_embeddings is not None:
+            # 1. Project the CLIP embeddings to match nanochat's n_embd
+            img_feats = self.vision_proj(image_embeddings) # Shape: (B, num_image_tokens, n_embd)
+            
+            # 2. Overwrite the placeholder tokens in `x`
+            # Assuming you put the dummy tokens right after the <|bos|> token at index 1
+            num_img_tokens = img_feats.shape[1]
+            x[:, 1:1+num_img_tokens, :] = img_feats
+        # --------------------------------
 
         # Smear: mix previous token's embedding into current position (cheap bigram info)
         if kv_cache is None:
@@ -469,7 +497,8 @@ class GPT(nn.Module):
         if targets is not None:
             # training: given the targets, compute and return the loss
             # TODO experiment with chunked cross-entropy?
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1, reduction=loss_reduction)
+            # Use reshape instead of view to be robust with non-contiguous/fake tensors
+            loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1, reduction=loss_reduction)
             return loss
         else:
             # inference: just return the logits directly

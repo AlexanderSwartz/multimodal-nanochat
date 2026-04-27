@@ -6,7 +6,7 @@ import torch
 import torch.distributed as dist
 
 @torch.no_grad()
-def evaluate_bpb(model, batches, steps, token_bytes):
+def evaluate_bpb(model, batches, steps, token_bytes, disable_image=False):
     """
     Instead of the naive 'mean loss', this function returns the bits per byte (bpb),
     which is a tokenization vocab size-independent metric, meaning you are still comparing
@@ -29,10 +29,24 @@ def evaluate_bpb(model, batches, steps, token_bytes):
     total_bytes = torch.tensor(0, dtype=torch.int64, device=model.get_device())
     batch_iter = iter(batches)
     for _ in range(steps):
-        x, y = next(batch_iter)
-        loss2d = model(x, y, loss_reduction='none') # (B, T)
-        loss2d = loss2d.view(-1) # flatten
-        y = y.view(-1) # flatten
+        batch = next(batch_iter)
+        # Support generators that yield either (inputs, targets) or
+        # (inputs, targets, image_embeddings). If image embeddings are
+        # present, forward them to the model so validation sees the image.
+        if isinstance(batch, (list, tuple)) and len(batch) == 3:
+            x, y, image_embeddings = batch
+        else:
+            x, y = batch
+            image_embeddings = None
+
+        # Optionally ignore image embeddings (text-only debug runs)
+        if disable_image:
+            image_embeddings = None
+
+        # Forward with or without image embeddings as provided by the loader
+        loss2d = model(x, y, loss_reduction='none', image_embeddings=image_embeddings)
+        loss2d = loss2d.reshape(-1) # flatten (reshape is safer with fake tensors)
+        y = y.reshape(-1) # flatten
         if (y.int() < 0).any(): # mps does not currently have kernel for < 0 for int64, only int32
             # slightly more complex code path if some target tokens are ignore_index (e.g. -1)
             # any target token < 0 is to be ignored: do NOT index token_bytes with negatives

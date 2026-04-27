@@ -37,7 +37,21 @@ class CustomJSON(Task):
                     line = line.strip()
                     if not line:  # skip empty lines
                         continue
-                    messages = json.loads(line)
+                    data = json.loads(line)
+
+                    # Support two formats for backward compatibility:
+                    # 1) Each line is a JSON array of messages: [{...}, {...}]
+                    # 2) Each line is a JSON object that contains a "messages" list plus optional metadata, e.g.
+                    #    {"image_id": 1000, "messages": [{...}, {...}]}
+                    if isinstance(data, dict):
+                        assert "messages" in data, f"Expected 'messages' key in JSON object, got keys: {list(data.keys())}"
+                        messages = data["messages"]
+                        # Preserve metadata (including image_id) alongside messages
+                        conversation = dict(data)
+                    else:
+                        messages = data
+                        conversation = {"messages": messages}
+
                     # Validate the conversation structure
                     assert isinstance(messages, list), f"Expected list of messages, got {type(messages)}"
                     assert len(messages) >= 2, f"Conversation must have at least 2 messages, got {len(messages)}"
@@ -49,7 +63,7 @@ class CustomJSON(Task):
                         assert message["role"] == expected_role, f"Message {i} has role {message['role']} but should be {expected_role}"
                         assert isinstance(message["content"], str), f"Message {i} content must be a string"
 
-                    self.conversations.append(messages)
+                    self.conversations.append(conversation)
 
         self.length = len(self.conversations)
 
@@ -57,9 +71,6 @@ class CustomJSON(Task):
         return self.length
 
     def get_example(self, index):
-        messages = self.conversations[index]
-        conversation = {
-            "messages": messages,
-        }
-        return conversation
+        # conversations entries are stored as dicts (with at least a 'messages' key)
+        return self.conversations[index]
 
