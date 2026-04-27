@@ -506,7 +506,8 @@ class GPT(nn.Module):
             return logits
 
     @torch.inference_mode()
-    def generate(self, tokens, max_tokens, temperature=1.0, top_k=None, seed=42):
+    # 1. Add image_embeddings=None to the signature
+    def generate(self, tokens, max_tokens, temperature=1.0, top_k=None, seed=42, image_embeddings=None):
         """
         Naive autoregressive streaming inference.
         To make it super simple, let's assume:
@@ -521,7 +522,8 @@ class GPT(nn.Module):
             rng.manual_seed(seed)
         ids = torch.tensor([tokens], dtype=torch.long, device=device) # add batch dim
         for _ in range(max_tokens):
-            logits = self.forward(ids) # (B, T, vocab_size)
+            # 2. Pass image_embeddings into the forward pass!
+            logits = self.forward(ids, image_embeddings=image_embeddings) # (B, T, vocab_size)
             logits = logits[:, -1, :] # (B, vocab_size)
             if top_k is not None and top_k > 0:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
