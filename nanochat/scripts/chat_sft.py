@@ -53,6 +53,8 @@ parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (e
 parser.add_argument("--model-tag", type=str, default=None, help="model tag to load from")
 parser.add_argument("--model-step", type=int, default=None, help="model step to load from")
 parser.add_argument("--load-optimizer", type=int, default=1, help="warm-start optimizer from pretrained checkpoint (0=no, 1=yes)")
+parser.add_argument("--train-vision-only", action='store_true', help="Freeze all model params except `vision_proj` and train only the vision projection layer")
+parser.add_argument("--vision-lr", type=float, default=None, help="learning rate for `vision_proj` when using --train-vision-only (default: args.embedding_lr or 1e-3)")
 # Training horizon
 parser.add_argument("--num-iterations", type=int, default=-1, help="number of optimization steps (-1 = full epoch)")
 # Batch sizes (default: inherit from pretrained checkpoint)
@@ -150,16 +152,41 @@ print0(f"Tokens / micro-batch: {world_tokens_per_fwdbwd:,}")
 print0(f"Total batch size {args.total_batch_size:,} => gradient accumulation steps: {grad_accum_steps}")
 token_bytes = get_token_bytes(device=device)
 
-# Initialize the Optimizer (combined MuonAdamW: Muon for matrix params, AdamW for rest)
-# Note that pretraining ramps weight_decay to zero by end of pretraining, so SFT continues with zero
-optimizer = model.setup_optimizer(unembedding_lr=args.unembedding_lr, embedding_lr=args.embedding_lr, matrix_lr=args.matrix_lr, weight_decay=0.0)
+# Initialize the Optimizer
+# Optionally support training *only* the vision projection layer (freeze everything else)
+if args.train_vision_only:
+    print0("Freezing all parameters except vision_proj; training vision projection only")
+    # Freeze everything first
+    for p in model.parameters():
+        p.requires_grad = False
+    # Ensure the model actually has a vision projection
+    if not hasattr(model, 'vision_proj'):
+        raise RuntimeError("Model has no 'vision_proj' attribute to train (cannot use --train-vision-only)")
+    # Unfreeze the vision projection parameters
+    for p in model.vision_proj.parameters():
+        p.requires_grad = True
+    # Build a small AdamW optimizer for the vision projection only
+    import torch.optim as optim
+    vis_lr = args.vision_lr if args.vision_lr is not None else (args.embedding_lr if args.embedding_lr is not None else 1e-3)
+    optimizer = optim.AdamW(list(model.vision_proj.parameters()), lr=vis_lr, weight_decay=0.0)
+    # Make the optimizer param groups compatible with the rest of the training loop
+    for group in optimizer.param_groups:
+        group['initial_lr'] = group['lr']
+        group['kind'] = 'adamw'
+else:
+    # Initialize the Optimizer (combined MuonAdamW: Muon for matrix params, AdamW for rest)
+    # Note that pretraining ramps weight_decay to zero by end of pretraining, so SFT continues with zero
+    optimizer = model.setup_optimizer(unembedding_lr=args.unembedding_lr, embedding_lr=args.embedding_lr, matrix_lr=args.matrix_lr, weight_decay=0.0)
 
 # Optionally warm-start optimizer from pretrained checkpoint (momentum buffers etc.)
 # Note: load_state_dict overwrites param_group metadata (LRs, betas, etc.) with the
 # pretrained values. Since pretraining warmdown brings LRs to ~0, we must save and
 # restore our fresh SFT LRs after loading.
 base_dir = get_base_dir()
-if args.load_optimizer:
+# Optionally warm-start optimizer from pretrained checkpoint (momentum buffers etc.)
+# Skip warm-start when we intentionally only train the vision projection layer because
+# optimizer states from the original checkpoint won't match the small optimizer.
+if args.load_optimizer and not args.train_vision_only:
     optimizer_data = load_optimizer_state("base", device, rank=ddp_rank, model_tag=args.model_tag, step=args.model_step)
     if optimizer_data is not None:
         base_lrs = [group["lr"] for group in optimizer.param_groups]
@@ -170,6 +197,8 @@ if args.load_optimizer:
         print0("Loaded optimizer state from pretrained checkpoint (momentum buffers only, LRs reset)")
     else:
         print0("WARNING: optimizer checkpoint not found, starting with fresh optimizer (slightly worse)")
+elif args.load_optimizer and args.train_vision_only:
+    print0("Skipping optimizer warm-start because --train-vision-only is set")
 
 # GradScaler for fp16 training (bf16/fp32 don't need it)
 scaler = torch.amp.GradScaler() if COMPUTE_DTYPE == torch.float16 else None
