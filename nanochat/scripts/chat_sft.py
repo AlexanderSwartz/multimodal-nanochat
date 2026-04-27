@@ -422,6 +422,25 @@ while True:
         eval_steps = args.eval_tokens // (args.device_batch_size * args.max_seq_len * ddp_world_size)
         val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes, disable_image=disable_image)
         print0(f"Step {step:05d} | Validation bpb: {val_bpb:.4f}")
+        if master_process:
+            preview_loader = build_val_loader()
+            preview_batch = next(preview_loader)
+            if isinstance(preview_batch, (list, tuple)) and len(preview_batch) == 3:
+                preview_x, _, preview_img_feats = preview_batch
+                preview_sample = val_dataset[0]
+                preview_image_id = preview_sample.get("image_id", "unknown")
+                preview_ids, preview_mask = tokenizer.render_conversation(preview_sample)
+                assistant_end_id = tokenizer.encode_special("<|assistant_end|>")
+                with torch.no_grad():
+                    preview_logits = model(preview_x[:1], image_embeddings=preview_img_feats[:1])
+                preview_pred_ids = preview_logits.argmax(dim=-1)[0].tolist()
+                preview_caption_ids = [
+                    token_id
+                    for token_id, mask_val in zip(preview_pred_ids, preview_mask[1:])
+                    if mask_val == 1 and token_id != assistant_end_id
+                ]
+                preview_caption = tokenizer.decode(preview_caption_ids).strip()
+                print0(f"Step {step:05d} | Validation sample image_id={preview_image_id} | caption: {preview_caption}")
         if val_bpb < min_val_bpb:
             min_val_bpb = val_bpb
         wandb_run.log({
