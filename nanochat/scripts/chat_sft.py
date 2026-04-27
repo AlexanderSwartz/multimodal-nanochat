@@ -29,8 +29,6 @@ from nanochat.checkpoint_manager import save_checkpoint, load_model, load_optimi
 from nanochat.loss_eval import evaluate_bpb
 import torch.distributed as dist
 from nanochat.flash_attention import HAS_FA3
-from nanochat.engine import Engine
-from scripts.chat_eval import run_chat_eval
 
 from tasks.common import TaskMixture
 from tasks.gsm8k import GSM8K
@@ -38,6 +36,11 @@ from tasks.mmlu import MMLU
 from tasks.smoltalk import SmolTalk
 from tasks.customjson import CustomJSON
 from tasks.spellingbee import SimpleSpelling, SpellingBee
+
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+default_train_jsonl = os.path.join(repo_root, "COCO_data", "coco_train.jsonl")
+default_val_jsonl = os.path.join(repo_root, "COCO_data", "coco_val_split.jsonl")
+default_test_jsonl = os.path.join(repo_root, "COCO_data", "coco_test.jsonl")
 
 # -----------------------------------------------------------------------------
 # CLI arguments
@@ -67,12 +70,13 @@ parser.add_argument("--final-lr-frac", type=float, default=0.0, help="final LR a
 # Evaluation
 parser.add_argument("--eval-every", type=int, default=200, help="evaluate val bpb every N steps (-1 = disable)")
 parser.add_argument("--eval-tokens", type=int, default=40*524288, help="number of tokens to evaluate val loss on")
-parser.add_argument("--chatcore-every", type=int, default=200, help="evaluate ChatCORE metric every N steps (-1 = disable)")
-parser.add_argument("--chatcore-max-cat", type=int, default=-1, help="max problems per categorical task for ChatCORE")
-parser.add_argument("--chatcore-max-sample", type=int, default=24, help="max problems per generative task for ChatCORE")
 # Data mixture
 parser.add_argument("--mmlu-epochs", type=int, default=3, help="number of epochs of MMLU in training mixture (teaches Multiple Choice)")
 parser.add_argument("--gsm8k-epochs", type=int, default=4, help="number of epochs of GSM8K in training mixture (teaches Math and Tool Use)")
+# COCO captioning data
+parser.add_argument("--train-jsonl", type=str, default=default_train_jsonl, help="training JSONL file")
+parser.add_argument("--val-jsonl", type=str, default=default_val_jsonl, help="validation JSONL file")
+parser.add_argument("--test-jsonl", type=str, default=default_test_jsonl, help="test JSONL file")
 # Debugging flags
 parser.add_argument("--disable-image", action='store_true', help="Disable using image embeddings during training/eval (text-only debug)")
 args = parser.parse_args()
@@ -177,24 +181,12 @@ for group in optimizer.param_groups:
     group["lr"] = group["lr"] * args.init_lr_frac
     group["initial_lr"] = group["lr"]
 
-# SFT data mixture and DataLoader
-identity_conversations_filepath = os.path.join(base_dir, "identity_conversations.jsonl")
-train_tasks = [
-    SmolTalk(split="train"), # 460K rows of general conversations
-    CustomJSON(filepath=identity_conversations_filepath), # 1000 rows of synthetic identity conversations
-    CustomJSON(filepath=identity_conversations_filepath), # 2 epochs of these
-    *[MMLU(subset="all", split="auxiliary_train") for _ in range(args.mmlu_epochs)], # 100K rows per epoch
-    *[GSM8K(subset="main", split="train") for _ in range(args.gsm8k_epochs)], # 8K rows per epoch
-    SimpleSpelling(size=200000, split="train"), # 200K rows of Simple Spelling (e.g. spell the word 'apple')
-    SpellingBee(size=80000, split="train"), # 80K rows of Spelling Bee (e.g. how many 'r' are in 'strawberry'?)
-]
-train_dataset = TaskMixture(train_tasks)
-print0(f"Training mixture: {len(train_dataset):,} rows (MMLU x{args.mmlu_epochs}, GSM8K x{args.gsm8k_epochs})")
-val_dataset = TaskMixture([
-    SmolTalk(split="test"), # 24K rows in test set
-    MMLU(subset="all", split="test", stop=5200), # 14K rows in test set, use only 5.2K to match the train ratios
-    GSM8K(subset="main", split="test", stop=420), # 1.32K rows in test set, use only 420 to match the train ratios
-]) # total: 24K + 5.2K + 0.42K ~= 29.6K rows
+# SFT data: COCO-only captioning splits by default
+print0(f"COCO train JSONL: {args.train_jsonl}")
+print0(f"COCO val JSONL: {args.val_jsonl}")
+train_dataset = CustomJSON(filepath=args.train_jsonl)
+val_dataset = CustomJSON(filepath=args.val_jsonl)
+print0(f"COCO dataset sizes: train={len(train_dataset):,} val={len(val_dataset):,}")
 # DataLoader is defined here, it emits inputs, targets : 2D tensors of shape (device_batch_size, max_seq_len)
 # A big problem is that we don't know the final num_iterations in advance. So we create
 # these two global variables and update them from within the data generator.
@@ -221,6 +213,27 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
     # Useful for debugging dataset/embedding mismatches: set NANOCHAT_STRICT_IMAGE_EMBEDDINGS=1
     strict_image_embeddings = os.environ.get("NANOCHAT_STRICT_IMAGE_EMBEDDINGS", "0").lower() in ("1", "true", "yes")
 
+    # Cache a fallback embedding shape once so refill_buffer does not rescan the
+    # embeddings directory on every call. In the COCO-only setup this should
+    # almost never be used, but it keeps the code robust for missing rows.
+    default_image_emb = None
+    try:
+        emb_files = glob.glob(os.path.join(repo_root, "COCO_data", "embeddings", "*.pt"))
+        for ef in emb_files:
+            try:
+                t = torch.load(ef, map_location="cpu")
+            except Exception:
+                continue
+            if t.dim() == 3 and t.shape[0] == 1:
+                t = t.squeeze(0)
+            if t.dim() == 2:
+                default_image_emb = t
+                break
+    except Exception:
+        default_image_emb = None
+    if default_image_emb is None:
+        default_image_emb = torch.zeros((50, 768), dtype=torch.float32)
+
     # Conversation buffer: list of (token_ids, loss_mask) tuples
     conv_buffer = []
     cursor = ddp_rank  # Each rank processes different conversations (for fetching)
@@ -230,26 +243,6 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
 
     def refill_buffer():
         nonlocal cursor, epoch
-        # Prepare a default image embedding shape by inspecting existing saved embeddings.
-        # This avoids failures when mixing non-image tasks into the training mixture.
-        default_image_emb = None
-        try:
-            emb_files = glob.glob("COCO_data/embeddings/*.pt")
-            for ef in emb_files:
-                try:
-                    t = torch.load(ef, map_location="cpu")
-                except Exception:
-                    continue
-                if t.dim() == 3 and t.shape[0] == 1:
-                    t = t.squeeze(0)
-                if t.dim() == 2:
-                    default_image_emb = t
-                    break
-        except Exception:
-            default_image_emb = None
-        if default_image_emb is None:
-            # Fallback to a reasonable default: 50 tokens x 768 dims (CLIP ViT-B/32 typical)
-            default_image_emb = torch.zeros((50, 768), dtype=torch.float32)
         while len(conv_buffer) < buffer_size:
             conversation = dataset[cursor]
             ids, mask = tokenizer.render_conversation(conversation)
@@ -291,12 +284,12 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
                     )
                 image_emb = default_image_emb.clone()
             else:
-                emb_path = f"COCO_data/embeddings/{img_id}.pt"
+                emb_path = os.path.join(repo_root, "COCO_data", "embeddings", f"{img_id}.pt")
                 if not os.path.exists(emb_path):
                     if strict_image_embeddings and is_image_task:
                         raise FileNotFoundError(
                             f"Embedding file not found: {emb_path}\n"
-                            "Run the CLIP_COCO_loader.ipynb to generate embeddings at COCO_data/embeddings/{image_id}.pt"
+                            f"Run the CLIP_COCO_loader.ipynb to generate embeddings at {os.path.join(repo_root, 'COCO_data', 'embeddings', '{image_id}.pt')}"
                         )
                     print0(f"Warning: embedding file {emb_path} not found; using default embedding")
                     image_emb = default_image_emb.clone()
@@ -436,41 +429,6 @@ while True:
             "total_training_flops": flops_so_far,
             "total_training_time": total_training_time,
             "val/bpb": val_bpb,
-        })
-        model.train()
-
-    # once in a while: estimate the ChatCORE metric (all ranks participate)
-    # use the original uncompiled model because the inputs keep changing shape
-    chatcore_results = {}
-    if args.chatcore_every > 0 and (last_step or (step > 0 and step % args.chatcore_every == 0)):
-        model.eval()
-        engine = Engine(orig_model, tokenizer)
-        all_tasks = ['ARC-Easy', 'ARC-Challenge', 'MMLU', 'GSM8K', 'HumanEval', 'SpellingBee']
-        categorical_tasks = {'ARC-Easy', 'ARC-Challenge', 'MMLU'}
-        baseline_accuracies = {
-            'ARC-Easy': 0.25, 'ARC-Challenge': 0.25, 'MMLU': 0.25,
-            'GSM8K': 0.0, 'HumanEval': 0.0, 'SpellingBee': 0.0,
-        }
-        task_results = {}
-        for task_name in all_tasks:
-            limit = args.chatcore_max_cat if task_name in categorical_tasks else args.chatcore_max_sample
-            max_problems = None if limit < 0 else limit  # -1 means no limit
-            acc = run_chat_eval(task_name, orig_model, tokenizer, engine,
-                                batch_size=args.device_batch_size, max_problems=max_problems)
-            task_results[task_name] = acc
-            print0(f"  {task_name}: {100*acc:.2f}%")
-        # Compute ChatCORE metrics (mean centered accuracy, ranges from 0=random to 1=perfect)
-        def centered_mean(tasks):
-            return sum((task_results[t] - baseline_accuracies[t]) / (1.0 - baseline_accuracies[t]) for t in tasks) / len(tasks)
-        chatcore = centered_mean(all_tasks)
-        chatcore_cat = centered_mean(categorical_tasks)
-        print0(f"Step {step:05d} | ChatCORE: {chatcore:.4f} | ChatCORE_cat: {chatcore_cat:.4f}")
-        wandb_run.log({
-            "step": step,
-            "total_training_flops": flops_so_far,
-            "chatcore_metric": chatcore,
-            "chatcore_cat": chatcore_cat,
-            **{f"chatcore/{task_name}": acc for task_name, acc in task_results.items()},
         })
         model.train()
 
