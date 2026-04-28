@@ -452,24 +452,56 @@ while True:
         val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes, disable_image=disable_image)
         print0(f"Step {step:05d} | Validation bpb: {val_bpb:.4f}")
         if master_process:
-            preview_loader = build_val_loader()
-            preview_batch = next(preview_loader)
-            if isinstance(preview_batch, (list, tuple)) and len(preview_batch) == 3:
-                preview_x, _, preview_img_feats = preview_batch
-                preview_sample = val_dataset[0]
+            import random
+            num_preview = 5  # How many random val samples to show
+            val_indices = random.sample(range(len(val_dataset)), min(num_preview, len(val_dataset)))
+            for idx in val_indices:
+                preview_sample = val_dataset[idx]
                 preview_image_id = preview_sample.get("image_id", "unknown")
-                preview_ids, preview_mask = tokenizer.render_conversation(preview_sample)
-                assistant_end_id = tokenizer.encode_special("<|assistant_end|>")
-                with torch.no_grad():
-                    preview_logits = model(preview_x[:1], image_embeddings=preview_img_feats[:1])
-                preview_pred_ids = preview_logits.argmax(dim=-1)[0].tolist()
-                preview_caption_ids = [
-                    token_id
-                    for token_id, mask_val in zip(preview_pred_ids, preview_mask[1:])
-                    if mask_val == 1 and token_id != assistant_end_id
-                ]
-                preview_caption = tokenizer.decode(preview_caption_ids).strip()
-                print0(f"Step {step:05d} | Validation sample image_id={preview_image_id} | caption: {preview_caption}")
+                # Load image embedding for this sample
+                emb_path = os.path.join(repo_root, "COCO_data", "embeddings", f"{preview_image_id}.pt")
+                if not os.path.exists(emb_path):
+                    print0(f"[Preview] Embedding not found for image_id={preview_image_id}, skipping.")
+                    continue
+                preview_img_emb = torch.load(emb_path, map_location=device)
+                if preview_img_emb.dim() == 3 and preview_img_emb.shape[0] == 1:
+                    preview_img_emb = preview_img_emb.squeeze(0)
+                if preview_img_emb.dim() == 1:
+                    preview_img_emb = preview_img_emb.unsqueeze(0)
+                preview_img_emb = preview_img_emb.unsqueeze(0).to(device)  # (1, num_img_tokens, 768)
+
+                # 1. Create the prompt: ONLY the user side of the conversation
+                eval_conv = {"messages": [{"role": "user", "content": "Describe this image."}]}
+                prompt_ids, _ = tokenizer.render_conversation(eval_conv)
+                bos_id = prompt_ids.pop(0)
+                num_img_tokens = preview_img_emb.shape[1]
+                prompt_ids = [bos_id] + ([bos_id] * num_img_tokens) + prompt_ids
+
+                # 2. Generate caption
+                generated_ids = []
+                
+                # Get the ID for your stop token
+                stop_token_id = tokenizer.encode_special("<|assistant_end|>")
+                
+                for token in model.generate(prompt_ids, max_tokens=128, image_embeddings=preview_img_emb[:1]):
+                    # Check if the model wants to stop BEFORE adding the token to the list
+                    if token == stop_token_id:
+                        break
+                        
+                    generated_ids.append(token)
+                    
+                preview_caption = tokenizer.decode(generated_ids).strip()
+
+                # 3. Print the ground-truth (target) caption
+                gt_caption = ""
+                for msg in preview_sample.get("messages", []):
+                    if msg.get("role") == "assistant":
+                        gt_caption = msg.get("content", "")
+                        break
+
+                print0(f"Step {step:05d} | Validation image_id={preview_image_id}")
+                print0(f"  Generated: {preview_caption}")
+                print0(f"  Target:    {gt_caption}")
         if val_bpb < min_val_bpb:
             min_val_bpb = val_bpb
         wandb_run.log({
