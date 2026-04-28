@@ -490,7 +490,8 @@ while True:
                         
                     generated_ids.append(token)
                     
-                preview_caption = tokenizer.decode(generated_ids).strip()
+                # [1:] to skip <|assistant_start|>
+                preview_caption = tokenizer.decode(generated_ids[1:]).strip()
 
                 # 3. Print the ground-truth (target) caption
                 gt_caption = ""
@@ -499,9 +500,11 @@ while True:
                         gt_caption = msg.get("content", "")
                         break
 
-                print0(f"Step {step:05d} | Validation image_id={preview_image_id}")
+                print("----------------------------------")
+                print0(f"Step {step:05d} | Validation image_id: ~as7629/multimodal-nanochat/COCO_data/val2017/000000{preview_image_id}.jpg")
                 print0(f"  Generated: {preview_caption}")
                 print0(f"  Target:    {gt_caption}")
+                print("----------------------------------\n")
         if val_bpb < min_val_bpb:
             min_val_bpb = val_bpb
         wandb_run.log({
