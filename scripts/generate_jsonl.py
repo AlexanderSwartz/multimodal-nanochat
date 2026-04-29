@@ -5,6 +5,7 @@ parser = argparse.ArgumentParser(description="Generate coco_<split>.jsonl from C
 parser.add_argument("--split", choices=("train", "val"), required=True)
 parser.add_argument("--ann-dir", default="COCO_data/annotations")
 parser.add_argument("--out-dir", default="COCO_data")
+parser.add_argument("--expand", action="store_true", help="Expand each image into one entry per caption")
 args = parser.parse_args()
 
 ann_file = os.path.join(args.ann_dir, f"captions_{args.split}2017.json")
@@ -28,8 +29,18 @@ with open(out_file, "w", encoding="utf-8") as out:
         i = im.get("id")
         if i is None:
             continue
-        c = caps.get(i, [""])[0] if caps.get(i) else ""
-        conv = {"image_id": i, "messages": [{"role": "user", "content": "Describe this image."}, {"role": "assistant", "content": c}]}
-        out.write(json.dumps(conv, ensure_ascii=False) + "\n")
+        if args.expand:
+            caps_list = caps.get(i, [])
+            if not caps_list:
+                conv = {"image_id": i, "messages": [{"role": "user", "content": "Describe this image."}, {"role": "assistant", "content": ""}]}
+                out.write(json.dumps(conv, ensure_ascii=False) + "\n")
+            else:
+                for cap in caps_list:
+                    conv = {"image_id": i, "messages": [{"role": "user", "content": "Describe this image."}, {"role": "assistant", "content": cap}]}
+                    out.write(json.dumps(conv, ensure_ascii=False) + "\n")
+        else:
+            c = caps.get(i, [""])[0] if caps.get(i) else ""
+            conv = {"image_id": i, "messages": [{"role": "user", "content": "Describe this image."}, {"role": "assistant", "content": c}]}
+            out.write(json.dumps(conv, ensure_ascii=False) + "\n")
 
 print(f"Wrote {out_file}")
