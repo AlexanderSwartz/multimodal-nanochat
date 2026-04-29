@@ -42,6 +42,12 @@ default_train_jsonl = os.path.join(repo_root, "COCO_data", "coco_train.jsonl")
 default_val_jsonl = os.path.join(repo_root, "COCO_data", "coco_val_split.jsonl")
 default_test_jsonl = os.path.join(repo_root, "COCO_data", "coco_test.jsonl")
 
+# Discover train/val embeddings directories under COCO_data (embeddings_train, embeddings_val)
+emb_base = os.path.join(repo_root, "COCO_data")
+embeddings_train_dir = os.path.join(emb_base, "embeddings_train")
+embeddings_val_dir = os.path.join(emb_base, "embeddings_val")
+
+
 # -----------------------------------------------------------------------------
 # CLI arguments
 parser = argparse.ArgumentParser(description="Supervised fine-tuning (SFT) the model")
@@ -245,19 +251,24 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
     # Cache a fallback embedding shape once so refill_buffer does not rescan the
     # embeddings directory on every call. In the COCO-only setup this should
     # almost never be used, but it keeps the code robust for missing rows.
+    # Determine a sensible default embedding by scanning the appropriate
+    # embeddings directory for this split (train -> embeddings_train,
+    # val -> embeddings_val). Do not fallback to other dirs.
     default_image_emb = None
     try:
-        emb_files = glob.glob(os.path.join(repo_root, "COCO_data", "embeddings", "*.pt"))
-        for ef in emb_files:
-            try:
-                t = torch.load(ef, map_location="cpu")
-            except Exception:
-                continue
-            if t.dim() == 3 and t.shape[0] == 1:
-                t = t.squeeze(0)
-            if t.dim() == 2:
-                default_image_emb = t
-                break
+        emb_dir_to_scan = embeddings_train_dir if split == "train" else embeddings_val_dir
+        if os.path.isdir(emb_dir_to_scan):
+            emb_files = glob.glob(os.path.join(emb_dir_to_scan, "*.pt"))
+            for ef in emb_files:
+                try:
+                    t = torch.load(ef, map_location="cpu")
+                except Exception:
+                    continue
+                if t.dim() == 3 and t.shape[0] == 1:
+                    t = t.squeeze(0)
+                if t.dim() == 2:
+                    default_image_emb = t
+                    break
     except Exception:
         default_image_emb = None
     if default_image_emb is None:
@@ -313,14 +324,20 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
                     )
                 image_emb = default_image_emb.clone()
             else:
-                emb_path = os.path.join(repo_root, "COCO_data", "embeddings", f"{img_id}.pt")
-                if not os.path.exists(emb_path):
+                # Use the split-specific embeddings directory for this image id
+                emb_dir_to_use = embeddings_train_dir if split == "train" else embeddings_val_dir
+                emb_path = None
+                if os.path.isdir(emb_dir_to_use):
+                    candidate = os.path.join(emb_dir_to_use, f"{img_id}.pt")
+                    if os.path.exists(candidate):
+                        emb_path = candidate
+                if emb_path is None:
                     if strict_image_embeddings and is_image_task:
                         raise FileNotFoundError(
-                            f"Embedding file not found: {emb_path}\n"
-                            f"Run the CLIP_COCO_loader.ipynb to generate embeddings at {os.path.join(repo_root, 'COCO_data', 'embeddings', '{image_id}.pt')}"
+                            f"Embedding file not found for image_id {img_id} in {emb_dir_to_use}\n"
+                            "Run the CLIP_COCO_loader.ipynb to generate embeddings in that directory"
                         )
-                    print0(f"Warning: embedding file {emb_path} not found; using default embedding")
+                    print0(f"Warning: embedding for image_id {img_id} not found in {emb_dir_to_use}; using default embedding")
                     image_emb = default_image_emb.clone()
                 else:
                     image_emb = torch.load(emb_path, map_location="cpu")
@@ -458,12 +475,13 @@ while True:
             for idx in val_indices:
                 preview_sample = val_dataset[idx]
                 preview_image_id = preview_sample.get("image_id", "unknown")
-                # Load image embedding for this sample
-                emb_path = os.path.join(repo_root, "COCO_data", "embeddings", f"{preview_image_id}.pt")
-                if not os.path.exists(emb_path):
-                    print0(f"[Preview] Embedding not found for image_id={preview_image_id}, skipping.")
+                # Load image embedding for this sample from the val embeddings dir
+                emb_dir_to_use = embeddings_val_dir
+                candidate = os.path.join(emb_dir_to_use, f"{preview_image_id}.pt")
+                if not os.path.exists(candidate):
+                    print0(f"[Preview] Embedding not found for image_id={preview_image_id} in {emb_dir_to_use}, skipping.")
                     continue
-                preview_img_emb = torch.load(emb_path, map_location=device)
+                preview_img_emb = torch.load(candidate, map_location=device)
                 if preview_img_emb.dim() == 3 and preview_img_emb.shape[0] == 1:
                     preview_img_emb = preview_img_emb.squeeze(0)
                 if preview_img_emb.dim() == 1:
