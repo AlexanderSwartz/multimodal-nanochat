@@ -110,7 +110,7 @@ else:
 
 # wandb logging init
 use_dummy_wandb = args.run == "dummy" or not master_process
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat-sft", name=args.run, config=user_config)
+wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="Multimodal-Nanochat", name=args.run, config=user_config)
 
 # Flash Attention status
 if not HAS_FA3:
@@ -539,6 +539,7 @@ while True:
                 print("----------------------------------\n")
         if val_bpb < min_val_bpb:
             min_val_bpb = val_bpb
+        
         wandb_run.log({
             "step": step,
             "total_training_flops": flops_so_far,
@@ -663,9 +664,17 @@ while True:
         gc.collect() # manually collect, just to be safe for very long runs
 
 # print a few more stats
-print0(f"Peak memory usage: {get_max_memory() / 1024 / 1024:.2f}MiB")
+
+# print a few more stats
+peak_memory_mib = get_max_memory() / 1024 / 1024
+print0(f"Peak memory usage: {peak_memory_mib:.2f}MiB")
 print0(f"Total training time: {total_training_time/60:.2f}m")
 print0(f"Minimum validation bpb: {min_val_bpb:.4f}")
+
+# Log summary to wandb 
+wandb_run.summary["peak_memory_mib"] = peak_memory_mib
+wandb_run.summary["total_training_time_min"] = total_training_time/60
+wandb_run.summary["min_val_bpb"] = min_val_bpb
 
 # Log to report
 from nanochat.report import get_report
