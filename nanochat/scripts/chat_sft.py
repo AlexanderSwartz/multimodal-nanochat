@@ -37,6 +37,11 @@ from tasks.smoltalk import SmolTalk
 from tasks.customjson import CustomJSON
 from tasks.spellingbee import SimpleSpelling, SpellingBee
 
+from sentence_transformers import SentenceTransformer, util
+
+# load model to CPU to keep separate from GPU memory stats
+semantic_model = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
+
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 default_train_jsonl = os.path.join(repo_root, "COCO_data", "coco_train.jsonl")
 default_val_jsonl = os.path.join(repo_root, "COCO_data", "coco_val_split.jsonl")
@@ -486,10 +491,15 @@ while True:
             orig_model=(None if compile_disabled else orig_model),
         )
         print0(f"Step {step:05d} | Validation bpb: {val_bpb:.4f}")
+        avg_sim_score = None
         if master_process:
             import random
-            num_preview = 5  # How many random val samples to show
+            
+            num_preview = 100  
             val_indices = random.sample(range(len(val_dataset)), min(num_preview, len(val_dataset)))
+            
+            semantic_scores = []
+            
             for idx in val_indices:
                 preview_sample = val_dataset[idx]
                 preview_image_id = preview_sample.get("image_id", "unknown")
@@ -531,20 +541,34 @@ while True:
                     generated_ids.append(token)
                     
                 # [1:] to skip <|assistant_start|>
-                preview_caption = tokenizer.decode(generated_ids[1:]).strip()
+                generated_caption = tokenizer.decode(generated_ids[1:]).strip()
 
                 # 3. Print the ground-truth (target) caption
-                gt_caption = ""
+                target_caption = ""
                 for msg in preview_sample.get("messages", []):
                     if msg.get("role") == "assistant":
-                        gt_caption = msg.get("content", "")
+                        target_caption = msg.get("content", "")
                         break
+                        
+                # Calculate semantic cosine similarity
+                sim_score = 0.0
+                if target_caption:
+                    emb_generated_caption = semantic_model.encode(generated_caption, convert_to_tensor=True, device='cpu', show_progress_bar=False)
+                    emb_target_caption = semantic_model.encode(target_caption, convert_to_tensor=True, device='cpu', show_progress_bar=False)
+                    sim_score = util.cos_sim(emb_generated_caption, emb_target_caption).item()
+                    semantic_scores.append(sim_score)
+                else:
+                    exit("No ground-truth caption found for this sample, cannot compute semantic similarity.")
 
-                print("----------------------------------")
-                print0(f"Step {step:05d} | Validation image_id: ~as7629/multimodal-nanochat/COCO_data/val2017/000000{preview_image_id}.jpg")
-                print0(f"  Generated: {preview_caption}")
-                print0(f"  Target:    {gt_caption}")
-                print("----------------------------------\n")
+                # only print 5 generated captions
+                if len(semantic_scores) <= 5:
+                    print("----------------------------------")
+                    print0(f"Step {step:05d} | Validation image_id: ~as7629/multimodal-nanochat/COCO_data/val2017/000000{preview_image_id}.jpg")
+                    print0(f"  Generated: {generated_caption}")
+                    print0(f"  Target:    {target_caption}")
+                    print0(f"  Sim Score: {sim_score:.4f}")
+                    print("----------------------------------\n")
+                    
         if val_bpb < min_val_bpb:
             min_val_bpb = val_bpb
         
@@ -554,6 +578,12 @@ while True:
             "total_training_time": total_training_time,
             "val/bpb": val_bpb,
         })
+        
+        if semantic_scores:
+            wandb_run.log({
+                    "val/semantic_similarity": avg_sim_score
+            })
+        
         model.train()
 
     # save checkpoint at the end of the run (all ranks participate so each saves its optimizer shard)
@@ -675,7 +705,6 @@ while True:
             "total_training_flops": flops_so_far,
             "total_training_time": total_training_time,
             "train/loss": debiased_smooth_loss,
-            "train/lrm": lrm,
             "train/dt": dt,
             "train/tok_per_sec": tok_per_sec,
             "train/mfu": mfu,
@@ -702,6 +731,7 @@ print0(f"Total training time: {total_training_time/60:.2f}m")
 print0(f"Minimum validation bpb: {min_val_bpb:.4f}")
 
 # Log summary to wandb 
+if wandb_run is not None:
 wandb_run.summary["peak_memory_mib"] = peak_memory_mib
 wandb_run.summary["total_training_time_min"] = total_training_time/60
 wandb_run.summary["min_val_bpb"] = min_val_bpb
