@@ -61,6 +61,7 @@ parser.add_argument("--model-step", type=int, default=None, help="model step to 
 parser.add_argument("--load-optimizer", type=int, default=1, help="warm-start optimizer from pretrained checkpoint (0=no, 1=yes)")
 parser.add_argument("--train-vision-only", action='store_true', help="Freeze all model params except `vision_proj` and train only the vision projection layer")
 parser.add_argument("--vision-lr", type=float, default=None, help="learning rate for `vision_proj` when using --train-vision-only (default: args.embedding_lr or 1e-3)")
+parser.add_argument("--pin-memory", action='store_true', help="Use pinned memory for faster CPU to GPU Host-to-Device transfers")
 # Training horizon
 parser.add_argument("--num-iterations", type=int, default=-1, help="number of optimization steps (-1 = full epoch)")
 # Batch sizes (default: inherit from pretrained checkpoint)
@@ -401,9 +402,10 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
             img_rows.append(img_emb)  # Store the image tensor
 
         # --- TENSOR CREATION (Exact nanochat logic) ---
-        inputs = torch.tensor(rows, dtype=torch.long, device=device)
-        targets = torch.tensor(rows, dtype=torch.long, device=device)
-        mask_tensor = torch.tensor(mask_rows, dtype=torch.long, device=device)
+        # Create CPU tensors here (optionally pinned) and move to device later
+        inputs = torch.tensor(rows, dtype=torch.long)
+        targets = torch.tensor(rows, dtype=torch.long)
+        mask_tensor = torch.tensor(mask_rows, dtype=torch.long)
 
         # Apply the shifted mask to targets
         mask_targets = mask_tensor[:, 1:]
@@ -413,10 +415,16 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
         # Shift inputs
         inputs = inputs[:, :-1]
 
-        # Stack the batch of images into a single tensor, move to GPU and ensure
-        # a contiguous float32 tensor (helps avoid Triton/Inductor launch issues)
-        image_embeddings = torch.stack(img_rows).to(device=device, dtype=torch.float32).contiguous()
+        # Stack the batch of images into a single CPU float32 tensor (pin if requested).
+        # GPU copy is done in the training loop to allow async host->device transfer.
+        image_embeddings = torch.stack(img_rows).to(dtype=torch.float32).contiguous()
 
+        if args.pin_memory:
+            inputs = inputs.pin_memory()
+            targets = targets.pin_memory()
+            mask_tensor = mask_tensor.pin_memory()
+            image_embeddings = image_embeddings.pin_memory()
+            
         # Yield all three components to the training loop!
         yield inputs, targets, image_embeddings
 
@@ -446,7 +454,7 @@ def get_muon_momentum(it):
 # Training loop
 # x, y = next(train_loader) # prefetch the very first batch of data
 
-# 
+#   
 x, y, img_feats = next(train_loader)
 min_val_bpb = float("inf")
 smooth_train_loss = 0 # EMA of training loss
@@ -583,6 +591,11 @@ while True:
     synchronize()
     t0 = time.time()
     for micro_step in range(grad_accum_steps):
+        # manually move tensors so I can time the host->device transfer separately
+        x = x.to(device=device, non_blocking=args.pin_memory)
+        y = y.to(device=device, non_blocking=args.pin_memory)
+        img_feats = img_feats.to(device=device, dtype=torch.float32, non_blocking=args.pin_memory)
+
         # loss = model(x, y)
         if disable_image:
             loss = model(x, y, loss_reduction='mean')
