@@ -588,13 +588,23 @@ while True:
     # -------------------------------------------------------------------------
     # single training step
     # evaluate the gradient
+    dataloader_wait_ms = 0.0
+    h2d_events = []
+
     synchronize()
     t0 = time.time()
     for micro_step in range(grad_accum_steps):
+        h2d_start = torch.cuda.Event(enable_timing=True)
+        h2d_end = torch.cuda.Event(enable_timing=True)
+        h2d_start.record()
+        
         # manually move tensors so I can time the host->device transfer separately
         x = x.to(device=device, non_blocking=args.pin_memory)
         y = y.to(device=device, non_blocking=args.pin_memory)
         img_feats = img_feats.to(device=device, dtype=torch.float32, non_blocking=args.pin_memory)
+        
+        h2d_end.record()
+        h2d_events.append((h2d_start, h2d_end))
 
         # loss = model(x, y)
         if disable_image:
@@ -613,8 +623,13 @@ while True:
             scaler.scale(loss).backward()
         else:
             loss.backward()
+            
+        dataloader_wait_start = time.perf_counter()
         x, y, img_feats = next(train_loader) # prefetch the next batch while the GPU is busy with forward/backward
+        dataloader_wait_ms += (time.perf_counter() - dataloader_wait_start) * 1000
+        
         progress = max(progress, approx_progress) # only increase progress monotonically
+    h2d_transfer_ms = sum(start.elapsed_time(end) for start, end in h2d_events)
     # step the optimizer
     lrm = get_lr_multiplier(progress)
     muon_momentum = get_muon_momentum(step)
@@ -665,6 +680,8 @@ while True:
             "train/tok_per_sec": tok_per_sec,
             "train/mfu": mfu,
             "train/epoch": current_epoch,
+            "train/dataloader_wait_ms": dataloader_wait_ms,
+            "train/h2d_transfer_ms": h2d_transfer_ms
         })
 
     # The garbage collector spends ~500ms scanning for cycles quite frequently.
