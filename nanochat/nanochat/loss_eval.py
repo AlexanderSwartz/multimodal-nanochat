@@ -42,6 +42,16 @@ def evaluate_bpb(model, batches, steps, token_bytes, disable_image=False, orig_m
         # Optionally ignore image embeddings (text-only debug runs)
         if disable_image:
             image_embeddings = None
+            
+        # Account for manual H2D and pinned memory
+        device = model.get_device()
+        non_blocking = True if getattr(device, 'type', None) == 'cuda' else False
+        if x.device != device:
+            x = x.to(device=device, non_blocking=non_blocking)
+        if y.device != device:
+            y = y.to(device=device, non_blocking=non_blocking)
+        if image_embeddings is not None and image_embeddings.device != device:
+            image_embeddings = image_embeddings.to(device=device, dtype=torch.float32, non_blocking=non_blocking)
 
         # Forward with or without image embeddings as provided by the loader
         # If an uncompiled original model is provided, prefer it for
