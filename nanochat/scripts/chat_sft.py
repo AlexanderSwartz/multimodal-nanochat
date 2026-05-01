@@ -95,6 +95,7 @@ parser.add_argument("--test-jsonl", type=str, default=default_test_jsonl, help="
 parser.add_argument("--disable-image", action='store_true', help="Disable using image embeddings during training/eval (text-only debug)")
 args = parser.parse_args()
 user_config = vars(args).copy()
+user_config["COMPUTE_DTYPE"] = str(COMPUTE_DTYPE)
 # Allow disabling image handling via env var as well
 # e.g. export NANOCHAT_DISABLE_IMAGE=1
 disable_image = args.disable_image or os.environ.get("NANOCHAT_DISABLE_IMAGE", "0").lower() in ("1", "true", "yes")
