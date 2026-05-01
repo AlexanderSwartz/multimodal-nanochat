@@ -732,9 +732,9 @@ print0(f"Minimum validation bpb: {min_val_bpb:.4f}")
 
 # Log summary to wandb 
 if wandb_run is not None:
-wandb_run.summary["peak_memory_mib"] = peak_memory_mib
-wandb_run.summary["total_training_time_min"] = total_training_time/60
-wandb_run.summary["min_val_bpb"] = min_val_bpb
+    wandb_run.summary["peak_memory_mib"] = peak_memory_mib
+    wandb_run.summary["total_training_time_min"] = total_training_time/60
+    wandb_run.summary["min_val_bpb"] = min_val_bpb
 
 # Log to report
 from nanochat.report import get_report
