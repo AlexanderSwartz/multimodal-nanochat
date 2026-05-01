@@ -93,6 +93,7 @@ parser.add_argument("--val-jsonl", type=str, default=default_val_jsonl, help="va
 parser.add_argument("--test-jsonl", type=str, default=default_test_jsonl, help="test JSONL file")
 # Debugging flags
 parser.add_argument("--disable-image", action='store_true', help="Disable using image embeddings during training/eval (text-only debug)")
+parser.add_argument("--torch-compile", action='store_true', help="Enable torch.compile only for training")
 args = parser.parse_args()
 user_config = vars(args).copy()
 user_config["COMPUTE_DTYPE"] = str(COMPUTE_DTYPE)
@@ -148,11 +149,10 @@ for name, fallback, source in [
         print0(f"Using {name}={arg_val}")
 
 orig_model = model
-# Allow disabling torch.compile via env var TORCH_COMPILE_DISABLE=1 for debug runs
-compile_disabled = os.environ.get("TORCH_COMPILE_DISABLE", "0").lower() in ("1", "true", "yes")
-if compile_disabled:
-    print0("TORCH_COMPILE_DISABLE set; skipping torch.compile()")
-else:
+# Enable torch.compile only when CLI flag `--torch-compile` is provided (opt-in).
+compile_enabled = getattr(args, "torch_compile", False)
+if compile_enabled:
+    print0("CLI flag --torch-compile set; enabling torch.compile()")
     model = torch.compile(model, dynamic=False)
 depth = model.config.n_layer
 num_flops_per_token = model.estimate_flops()
@@ -489,7 +489,7 @@ while True:
             eval_steps,
             token_bytes,
             disable_image=disable_image,
-            orig_model=(None if compile_disabled else orig_model),
+            orig_model=(orig_model if compile_enabled else None),
         )
         print0(f"Step {step:05d} | Validation bpb: {val_bpb:.4f}")
         avg_sim_score = None
@@ -533,7 +533,7 @@ while True:
                 # Use the uncompiled original model for generation when compile
                 # is enabled to avoid compiled Triton kernel issues for image
                 # conditioned paths.
-                gen_model = orig_model if (not compile_disabled) else model
+                gen_model = orig_model if compile_enabled else model
                 for token in gen_model.generate(prompt_ids, max_tokens=128, image_embeddings=preview_img_emb[:1]):
                     # Check if the model wants to stop BEFORE adding the token to the list
                     if token == stop_token_id:
@@ -640,10 +640,9 @@ while True:
         if disable_image:
             loss = model(x, y, loss_reduction='mean')
         else:
-            # If torch.compile was used, prefer the original (uncompiled)
-            # model for image-conditioned forwards to avoid Inductor/Triton
-            # kernel-launch faults. Otherwise use the compiled model.
-            if not compile_disabled:
+            # When `--torch-compile` is used, prefer the original (uncompiled)
+            # model for image-conditioned forwards to avoid compiled kernel issues.
+            if compile_enabled:
                 loss = orig_model(x, y, loss_reduction='mean', image_embeddings=img_feats)
             else:
                 loss = model(x, y, loss_reduction='mean', image_embeddings=img_feats)
