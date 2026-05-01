@@ -495,7 +495,7 @@ while True:
         if master_process:
             import random
             
-            num_preview = 100  
+            num_preview = 5  
             val_indices = random.sample(range(len(val_dataset)), min(num_preview, len(val_dataset)))
             
             semantic_scores = []
@@ -573,16 +573,15 @@ while True:
             min_val_bpb = val_bpb
         
         wandb_run.log({
-            "step": step,
             "total_training_flops": flops_so_far,
             "total_training_time": total_training_time,
             "val/bpb": val_bpb,
-        })
+        }, step=step)
         
         if semantic_scores:
             wandb_run.log({
-                    "val/semantic_similarity": avg_sim_score
-            })
+                "val/semantic_similarity": avg_sim_score
+            }, step=step)
         
         model.train()
 
@@ -699,9 +698,9 @@ while True:
     if step > 10:
         total_training_time += dt # only count the time after the first 10 steps
     print0(f"step {step:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.2f} | epoch: {current_epoch} | total time: {total_training_time/60:.2f}m")
+    dataloader_fraction = dataloader_wait_ms / (dt*1000) if dt>0 else 0
     if step % 10 == 0:
         wandb_run.log({
-            "step": step,
             "total_training_flops": flops_so_far,
             "total_training_time": total_training_time,
             "train/loss": debiased_smooth_loss,
@@ -710,8 +709,9 @@ while True:
             "train/mfu": mfu,
             "train/epoch": current_epoch,
             "train/dataloader_wait_ms": dataloader_wait_ms,
-            "train/h2d_transfer_ms": h2d_transfer_ms
-        })
+            "train/h2d_transfer_ms": h2d_transfer_ms,
+            "train/dataloader_fraction": dataloader_fraction
+        }, step=step)
 
     # The garbage collector spends ~500ms scanning for cycles quite frequently.
     # We manually manage it to avoid these pauses during training.
