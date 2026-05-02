@@ -184,7 +184,10 @@ class Engine:
         simple (non-cached) generation. In that fallback mode only `num_samples==1`
         is supported.
         """
-        assert isinstance(tokens, list) and isinstance(tokens[0], int), "expecting list of ints"
+        # Accept either a single prompt (list[int]) or a batch of prompts (list[list[int]]).
+        if not isinstance(tokens, list) or len(tokens) == 0:
+            raise ValueError("`tokens` must be a non-empty list (either list[int] or list[list[int]])")
+        batched = isinstance(tokens[0], list)
         device = self.model.get_device()
         # NOTE: setting the dtype here and in this way is an ugly hack.
         # Currently the repo assumes that cuda -> bfloat16 and everything else -> float32.
@@ -207,13 +210,24 @@ class Engine:
 
         # If kv-cache disabled, do non-cached autoregressive generation
         if not use_kv_cache:
+            # Non-cached fallback only supports single-sample generation and single prompt or
+            # a batch of prompts (but in the batch case we only support num_samples==1).
             if num_samples != 1:
                 raise ValueError("use_kv_cache=False with num_samples>1 is not supported")
-            device = self.model.get_device()
             rng = torch.Generator(device=device)
             rng.manual_seed(seed)
-            # Prepare initial ids tensor (B=1)
-            ids = torch.tensor([tokens], dtype=torch.long, device=device)
+            # Prepare initial ids tensor
+            if batched:
+                max_len = max(len(s) for s in tokens)
+                bos = self.tokenizer.get_bos_token_id()
+                padded = [s + [bos] * (max_len - len(s)) for s in tokens]
+                ids = torch.tensor(padded, dtype=torch.long, device=device)
+            else:
+                ids = torch.tensor([tokens], dtype=torch.long, device=device)
+            # Ensure image_embeddings are on the correct device for non-cached path
+            if image_embeddings is not None and isinstance(image_embeddings, torch.Tensor):
+                image_embeddings = image_embeddings.to(device=device, dtype=torch.float32)
+
             max_steps = max_tokens if max_tokens is not None else self.model.config.sequence_len
             for _ in range(max_steps):
                 # Forward the model on the full context so far (no kv cache)
@@ -222,29 +236,68 @@ class Engine:
                 last_logits = logits[:, -1, :]
                 next_ids = sample_next_token(last_logits, rng, temperature, top_k)  # (B,1)
                 # Yield in the Engine API format: (token_column, token_masks)
-                yield [int(next_ids[0, 0].item())], [1]
+                # convert to python ints for API compatibility
+                token_column = [int(next_ids[i, 0].item()) for i in range(next_ids.size(0))]
+                yield token_column, [1] * next_ids.size(0)
                 # Append the sampled id to the sequence for the next step
                 ids = torch.cat([ids, next_ids], dim=1)
             return
 
-        # 1) Run a batch 1 prefill of the prompt tokens
+        # 1) Run a prefill of the prompt tokens. Support either a single prompt
+        #    (old behavior) or a batch of prompts (list of lists). For batched
+        #    prompts we currently only support `num_samples==1` (one generated
+        #    sequence per prompt). If prompt lengths differ we pad to the max
+        #    length using the BOS token.
         m = self.model.config
         kv_model_kwargs = {"num_heads": m.n_kv_head, "head_dim": m.n_embd // m.n_head, "num_layers": m.n_layer}
-        kv_cache_prefill = KVCache(
-            batch_size=1,
-            seq_len=len(tokens),
-            device=device,
-            dtype=dtype,
-            **kv_model_kwargs,
-        )
-        ids = torch.tensor([tokens], dtype=torch.long, device=device)
-        logits = self.model.forward(ids, kv_cache=kv_cache_prefill, image_embeddings=image_embeddings)
-        logits = logits[:, -1, :].expand(num_samples, -1)  # (num_samples, vocab_size)
+        # default batch_size for single-prompt behavior
+        batch_size = 1
+        if batched:
+            if num_samples != 1:
+                raise ValueError("Batched prompts currently only support num_samples==1")
+            batch_size = len(tokens)
+            max_len = max(len(s) for s in tokens)
+            bos = self.tokenizer.get_bos_token_id()
+            padded = [s + [bos] * (max_len - len(s)) for s in tokens]
+            ids = torch.tensor(padded, dtype=torch.long, device=device)
+            seq_len = ids.size(1)
+            kv_cache_prefill = KVCache(
+                batch_size=batch_size,
+                seq_len=seq_len,
+                device=device,
+                dtype=dtype,
+                **kv_model_kwargs,
+            )
+            # Ensure image_embeddings (if provided) is on the correct device
+            if image_embeddings is not None and isinstance(image_embeddings, torch.Tensor):
+                image_embeddings = image_embeddings.to(device=device, dtype=torch.float32)
+            logits = self.model.forward(ids, kv_cache=kv_cache_prefill, image_embeddings=image_embeddings)
+            logits = logits[:, -1, :]
+        else:
+            # original single-prompt prefill behavior
+            kv_cache_prefill = KVCache(
+                batch_size=1,
+                seq_len=len(tokens),
+                device=device,
+                dtype=dtype,
+                **kv_model_kwargs,
+            )
+            ids = torch.tensor([tokens], dtype=torch.long, device=device)
+            # Move image embeddings to device if provided
+            if image_embeddings is not None and isinstance(image_embeddings, torch.Tensor):
+                image_embeddings = image_embeddings.to(device=device, dtype=torch.float32)
+            logits = self.model.forward(ids, kv_cache=kv_cache_prefill, image_embeddings=image_embeddings)
+            logits = logits[:, -1, :].expand(num_samples, -1)  # (num_samples, vocab_size)
 
         # 2) Replicate the KV cache for each sample/row
-        kv_length_hint = (len(tokens) + max_tokens) if max_tokens is not None else self.model.config.sequence_len
+        # compute prefill length (sequence length of prompt tokens)
+        prefill_len = seq_len if batched else len(tokens)
+        kv_length_hint = (prefill_len + max_tokens) if max_tokens is not None else self.model.config.sequence_len
+        # Determine decode batch size: for batched prompts we decode B rows,
+        # otherwise we decode `num_samples` variants of the single prompt.
+        decode_batch_size = batch_size if batched else num_samples
         kv_cache_decode = KVCache(
-            batch_size=num_samples,
+            batch_size=decode_batch_size,
             seq_len=kv_length_hint,
             device=device,
             dtype=dtype,
@@ -254,7 +307,12 @@ class Engine:
         del kv_cache_prefill # no need to keep this memory around
 
         # 3) Initialize states for each sample
-        row_states = [RowState(tokens.copy()) for _ in range(num_samples)]
+        if batched:
+            # one RowState per prompt row
+            row_states = [RowState(tokens[i].copy()) for i in range(batch_size)]
+        else:
+            # multiple samples of the same prompt
+            row_states = [RowState(tokens.copy()) for _ in range(num_samples)]
 
         # 4) Main generation loop
         num_generated = 0
