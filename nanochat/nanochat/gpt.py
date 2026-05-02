@@ -439,17 +439,18 @@ class GPT(nn.Module):
         x = norm(x)
         
         # --- NEW MULTIMODAL INJECTION ---
+        # The placeholder approach means you insert fake, dummy tokens (like -1 or a special <image> ID) 
+        # into your text input sequence exactly where you want the image to appear. 
+        # During the forward pass, you intercept the sequence of text embeddings and 
+        # physically overwrite the vectors at those placeholder positions with your actual projected visual vectors.
         if image_embeddings is not None:
             # 1. Project the CLIP embeddings to match nanochat's n_embd
             img_feats = self.vision_proj(image_embeddings) # Shape: (B, num_image_tokens, n_embd)
+            
+            # 2. Overwrite the placeholder tokens in `x`
+            # Assuming you put the dummy tokens right after the <|bos|> token at index 1
             num_img_tokens = img_feats.shape[1]
-            
-            # 2. Rebuild the sequence OUT-OF-PLACE to avoid SymInt Triton crashes
-            part1 = x[:, :1, :]                       # The <|bos|> token
-            part2 = img_feats                         # The projected image features
-            part3 = x[:, 1+num_img_tokens:, :]        # The rest of the text sequence
-            
-            x = torch.cat([part1, part2, part3], dim=1).contiguous()
+            x[:, 1:1+num_img_tokens, :] = img_feats
         # --------------------------------
 
         # Smear: mix previous token's embedding into current position (cheap bigram info)
