@@ -147,13 +147,7 @@ for name, fallback, source in [
     else:
         print0(f"Using {name}={arg_val}")
 
-orig_model = model
-# Allow disabling torch.compile via env var TORCH_COMPILE_DISABLE=1 for debug runs
-compile_disabled = os.environ.get("TORCH_COMPILE_DISABLE", "0").lower() in ("1", "true", "yes")
-if compile_disabled:
-    print0("TORCH_COMPILE_DISABLE set; skipping torch.compile()")
-else:
-    model = torch.compile(model, dynamic=False)
+# Use a single eager model instance (do not call torch.compile)
 depth = model.config.n_layer
 num_flops_per_token = model.estimate_flops()
 tokens_per_fwdbwd = args.device_batch_size * args.max_seq_len # tokens per iteration for a single rank
@@ -481,15 +475,12 @@ while True:
         model.eval()
         val_loader = build_val_loader()
         eval_steps = args.eval_tokens // (args.device_batch_size * args.max_seq_len * ddp_world_size)
-        # Pass the original (uncompiled) model into evaluate_bpb so that
-        # image-conditioned forwards run eagerly when torch.compile is enabled.
         val_bpb = evaluate_bpb(
             model,
             val_loader,
             eval_steps,
             token_bytes,
-            disable_image=disable_image,
-            orig_model=(None if compile_disabled else orig_model),
+            disable_image=disable_image
         )
         print0(f"Step {step:05d} | Validation bpb: {val_bpb:.4f}")
         avg_sim_score = None
@@ -530,11 +521,8 @@ while True:
                 # Get the ID for your stop token
                 stop_token_id = tokenizer.encode_special("<|assistant_end|>")
                 
-                # Use the uncompiled original model for generation when compile
-                # is enabled to avoid compiled Triton kernel issues for image
-                # conditioned paths.
-                gen_model = orig_model if (not compile_disabled) else model
-                for token in gen_model.generate(prompt_ids, max_tokens=128, image_embeddings=preview_img_emb[:1]):
+                # Use the single eager model for generation.
+                for token in model.generate(prompt_ids, max_tokens=128, image_embeddings=preview_img_emb[:1]):
                     # Check if the model wants to stop BEFORE adding the token to the list
                     if token == stop_token_id:
                         break
@@ -593,7 +581,7 @@ while True:
         save_checkpoint(
             checkpoint_dir,
             step,
-            orig_model.state_dict(),
+            model.state_dict(),
             optimizer.state_dict(),
             {
                 "step": step,
@@ -640,13 +628,8 @@ while True:
         if disable_image:
             loss = model(x, y, loss_reduction='mean')
         else:
-            # If torch.compile was used, prefer the original (uncompiled)
-            # model for image-conditioned forwards to avoid Inductor/Triton
-            # kernel-launch faults. Otherwise use the compiled model.
-            if not compile_disabled:
-                loss = orig_model(x, y, loss_reduction='mean', image_embeddings=img_feats)
-            else:
-                loss = model(x, y, loss_reduction='mean', image_embeddings=img_feats)
+            # Use the eager model for image-conditioned forwards.
+            loss = model(x, y, loss_reduction='mean', image_embeddings=img_feats)
         train_loss = loss.detach() # for logging
         loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
         if scaler is not None:

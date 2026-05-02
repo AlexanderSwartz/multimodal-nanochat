@@ -6,7 +6,7 @@ import torch
 import torch.distributed as dist
 
 @torch.no_grad()
-def evaluate_bpb(model, batches, steps, token_bytes, disable_image=False, orig_model=None):
+def evaluate_bpb(model, batches, steps, token_bytes, disable_image=False):
     """
     Instead of the naive 'mean loss', this function returns the bits per byte (bpb),
     which is a tokenization vocab size-independent metric, meaning you are still comparing
@@ -53,14 +53,7 @@ def evaluate_bpb(model, batches, steps, token_bytes, disable_image=False, orig_m
         if image_embeddings is not None and image_embeddings.device != device:
             image_embeddings = image_embeddings.to(device=device, dtype=torch.float32, non_blocking=non_blocking)
 
-        # Forward with or without image embeddings as provided by the loader
-        # If an uncompiled original model is provided, prefer it for
-        # image-conditioned forwards to avoid potential Inductor/Triton
-        # kernel-launch issues when using torch.compile.
-        use_model = model
-        if orig_model is not None and image_embeddings is not None:
-            use_model = orig_model
-        loss2d = use_model(x, y, loss_reduction='none', image_embeddings=image_embeddings)
+        loss2d = model(x, y, loss_reduction='none', image_embeddings=image_embeddings)
         loss2d = loss2d.reshape(-1) # flatten (reshape is safer with fake tensors)
         y = y.reshape(-1) # flatten
         if (y.int() < 0).any(): # mps does not currently have kernel for < 0 for int64, only int32
