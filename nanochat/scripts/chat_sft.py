@@ -500,7 +500,6 @@ while True:
             val_indices = random.sample(range(len(val_dataset)), min(num_preview, len(val_dataset)))
             samples = []
             image_embs = []
-            prompt_lists = []
             eval_conv = {"messages": [{"role": "user", "content": "Describe this image."}]}
 
             for idx in val_indices:
@@ -534,12 +533,11 @@ while True:
                 # Stack and move to device later (engine will also ensure device)
                 batched_img_emb = torch.stack(padded_embs, dim=0).to(dtype=torch.float32)
 
-                # Build per-sample prompt token lists with placeholders matching max_img_tokens
+                # Build a single prompt token list with placeholders matching max_img_tokens.
                 bos_id = tokenizer.get_bos_token_id()
-                for _ in samples:
-                    prompt_ids, _ = tokenizer.render_conversation(eval_conv)
-                    b = prompt_ids.pop(0)
-                    prompt_lists.append([b] + ([b] * max_img_tokens) + prompt_ids)
+                prompt_ids, _ = tokenizer.render_conversation(eval_conv)
+                b = prompt_ids.pop(0)
+                prompt_template = [b] + ([b] * max_img_tokens) + prompt_ids
 
                 # Run batched generation in smaller chunks to limit GPU memory
                 engine = Engine(model, tokenizer)
@@ -551,7 +549,8 @@ while True:
                 # iterate in chunks so we never prefill more than `preview_batch` rows at once
                 for start in range(0, len(samples), preview_batch):
                     end = min(start + preview_batch, len(samples))
-                    sub_prompts = prompt_lists[start:end]
+                    # reuse the same prompt template for each sub-batch
+                    sub_prompts = [prompt_template] * (end - start)
                     sub_embs = batched_img_emb[start:end]  # CPU tensor slice
                     # Move this chunk of image embeddings to device for generation
                     if device.type == 'cuda':
@@ -560,6 +559,8 @@ while True:
                         sub_embs_device = sub_embs.to(device=device, dtype=torch.float32)
 
                     val_start_time = time.time()
+                    # sub_prompts should all be the same: 50 tokens of image embedding placeholders followed by the "Describe the image" tokens
+                    # sub_embs_device is a tensor of shape (sub_batch_size, max_img_tokens, dim) containing the image embeddings for this chunk
                     for token_column, token_masks in engine.generate(
                         sub_prompts,
                         num_samples=1,
