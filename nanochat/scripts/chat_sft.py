@@ -27,6 +27,7 @@ from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, g
 from nanochat.tokenizer import get_token_bytes
 from nanochat.checkpoint_manager import save_checkpoint, load_model, load_optimizer_state
 from nanochat.loss_eval import evaluate_bpb
+from nanochat.engine import Engine
 import torch.distributed as dist
 from nanochat.flash_attention import HAS_FA3
 
@@ -93,6 +94,7 @@ parser.add_argument("--val-jsonl", type=str, default=default_val_jsonl, help="va
 parser.add_argument("--test-jsonl", type=str, default=default_test_jsonl, help="test JSONL file")
 # Debugging flags
 parser.add_argument("--disable-image", action='store_true', help="Disable using image embeddings during training/eval (text-only debug)")
+parser.add_argument("--kv-cache", action='store_true', help="Use KV cache (Engine) for preview generation (faster inference)")
 args = parser.parse_args()
 user_config = vars(args).copy()
 user_config["COMPUTE_DTYPE"] = str(COMPUTE_DTYPE)
@@ -486,8 +488,9 @@ while True:
         avg_sim_score = None
         if master_process:
             import random
+            total_val_generation_time = 0.0
             
-            num_preview = 5  
+            num_preview = 20  
             val_indices = random.sample(range(len(val_dataset)), min(num_preview, len(val_dataset)))
             
             semantic_scores = []
@@ -521,13 +524,26 @@ while True:
                 # Get the ID for your stop token
                 stop_token_id = tokenizer.encode_special("<|assistant_end|>")
                 
-                # Use the single eager model for generation.
-                for token in model.generate(prompt_ids, max_tokens=128, image_embeddings=preview_img_emb[:1]):
+                # Use Engine for preview generation (Engine can itself fallback to model.generate when requested)
+                engine = Engine(model, tokenizer)
+                val_start_time = time.time()
+                for token_column, token_masks in engine.generate(
+                    prompt_ids,
+                    num_samples=1,
+                    max_tokens=512,
+                    temperature=1.0,
+                    top_k=None,
+                    seed=42,
+                    image_embeddings=preview_img_emb[:1],
+                    use_kv_cache=args.kv_cache,
+                ):
+                    token = token_column[0]
                     # Check if the model wants to stop BEFORE adding the token to the list
-                    if token == stop_token_id:
-                        break
-                        
+                    # if token == stop_token_id:
+                    #     break
                     generated_ids.append(token)
+                total_val_generation_time += time.time() - val_start_time
+                
                     
                 # [1:] to skip <|assistant_start|>
                 generated_caption = tokenizer.decode(generated_ids[1:]).strip()
@@ -557,6 +573,8 @@ while True:
                     print0(f"  Target:    {target_caption}")
                     print0(f"  Sim Score: {sim_score:.4f}")
                     print("----------------------------------\n")
+            
+            avg_val_generation_time = total_val_generation_time / num_preview
                     
         if val_bpb < min_val_bpb:
             min_val_bpb = val_bpb
@@ -565,9 +583,11 @@ while True:
             "total_training_flops": flops_so_far,
             "total_training_time": total_training_time,
             "val/bpb": val_bpb,
+            "val/avg_generation_time_seconds": avg_val_generation_time,
         }, step=step)
         
         if semantic_scores:
+            avg_sim_score = sum(semantic_scores) / len(semantic_scores)
             wandb_run.log({
                 "val/semantic_similarity": avg_sim_score
             }, step=step)

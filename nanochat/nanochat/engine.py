@@ -173,8 +173,17 @@ class Engine:
         self.tokenizer = tokenizer # needed for tool use
 
     @torch.inference_mode()
-    def generate(self, tokens, num_samples=1, max_tokens=None, temperature=1.0, top_k=None, seed=42):
-        """Same as generate, but does single prefill and then clones the KV cache."""
+    def generate(self, tokens, num_samples=1, max_tokens=None, temperature=1.0, top_k=None, seed=42, image_embeddings=None, use_kv_cache=True):
+        """Same as generate, but does single prefill and then clones the KV cache.
+
+        Optional `image_embeddings` may be provided for image-conditioned models; these
+        are only used during the batch-1 prefill so the decoded KV cache contains the
+        injected visual tokens. Subsequent decode steps use the KV cache only.
+
+        If `use_kv_cache` is False, this function falls back to `model.generate()` for
+        simple (non-cached) generation. In that fallback mode only `num_samples==1`
+        is supported.
+        """
         assert isinstance(tokens, list) and isinstance(tokens[0], int), "expecting list of ints"
         device = self.model.get_device()
         # NOTE: setting the dtype here and in this way is an ugly hack.
@@ -196,6 +205,28 @@ class Engine:
         assistant_end = get_special("<|assistant_end|>") # if sampled, ends row
         bos = self.tokenizer.get_bos_token_id() # if sampled, ends row
 
+        # If kv-cache disabled, do non-cached autoregressive generation
+        if not use_kv_cache:
+            if num_samples != 1:
+                raise ValueError("use_kv_cache=False with num_samples>1 is not supported")
+            device = self.model.get_device()
+            rng = torch.Generator(device=device)
+            rng.manual_seed(seed)
+            # Prepare initial ids tensor (B=1)
+            ids = torch.tensor([tokens], dtype=torch.long, device=device)
+            max_steps = max_tokens if max_tokens is not None else self.model.config.sequence_len
+            for _ in range(max_steps):
+                # Forward the model on the full context so far (no kv cache)
+                logits = self.model.forward(ids, image_embeddings=image_embeddings)
+                # logits: (B, T, V)
+                last_logits = logits[:, -1, :]
+                next_ids = sample_next_token(last_logits, rng, temperature, top_k)  # (B,1)
+                # Yield in the Engine API format: (token_column, token_masks)
+                yield [int(next_ids[0, 0].item())], [1]
+                # Append the sampled id to the sequence for the next step
+                ids = torch.cat([ids, next_ids], dim=1)
+            return
+
         # 1) Run a batch 1 prefill of the prompt tokens
         m = self.model.config
         kv_model_kwargs = {"num_heads": m.n_kv_head, "head_dim": m.n_embd // m.n_head, "num_layers": m.n_layer}
@@ -207,7 +238,7 @@ class Engine:
             **kv_model_kwargs,
         )
         ids = torch.tensor([tokens], dtype=torch.long, device=device)
-        logits = self.model.forward(ids, kv_cache=kv_cache_prefill)
+        logits = self.model.forward(ids, kv_cache=kv_cache_prefill, image_embeddings=image_embeddings)
         logits = logits[:, -1, :].expand(num_samples, -1)  # (num_samples, vocab_size)
 
         # 2) Replicate the KV cache for each sample/row
