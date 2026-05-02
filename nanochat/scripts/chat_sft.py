@@ -39,29 +39,6 @@ from tasks.spellingbee import SimpleSpelling, SpellingBee
 
 from sentence_transformers import SentenceTransformer, util
 
-import torch._inductor.config as inductor_config
-inductor_config.max_autotune = False
-inductor_config.max_autotune_gemm = False
-inductor_config.fx_graph_cache = False
-
-os.environ.setdefault("TORCHINDUCTOR_MAX_AUTOTUNE", "0")
-os.environ.setdefault("TORCHINDUCTOR_MAX_AUTOTUNE_GEMM", "0")
-os.environ.setdefault("TORCHINDUCTOR_MAX_AUTOTUNE_POINTWISE", "0")
-os.environ.setdefault("TORCHINDUCTOR_MAX_AUTOTUNE_GEMM_BACKENDS", "ATEN")
-os.environ.setdefault("TORCHINDUCTOR_USE_STATIC_CUDA_LAUNCHER", "0")
-os.environ.setdefault("TORCHINDUCTOR_DUMP_LAUNCH_PARAMS", "1")
-
-# also try updating the runtime config object (best-effort)
-try:
-    import torch._inductor.config as inductor_config
-    inductor_config.max_autotune = False
-    inductor_config.max_autotune_gemm = False
-    inductor_config.max_autotune_pointwise = False
-    inductor_config.max_autotune_gemm_backends = "ATEN"
-    inductor_config.use_static_cuda_launcher = False
-except Exception:
-    pass
-
 # load model to CPU to keep separate from GPU memory stats
 semantic_model = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
 
@@ -170,26 +147,13 @@ for name, fallback, source in [
         print0(f"NOTE: --{name.replace('_', '-')}={arg_val} overrides pretrained value of {pretrain_val}")
     else:
         print0(f"Using {name}={arg_val}")
-        
-        
 
 orig_model = model
-
-model.to(device)
-
 # Enable torch.compile only when CLI flag `--torch-compile` is provided (opt-in).
 compile_enabled = getattr(args, "torch_compile", False)
 if compile_enabled:
     print0("CLI flag --torch-compile set; enabling torch.compile()")
-    # Some Triton/Inductor autotuning modes can produce kernels that
-    # fail on certain GPUs/drivers. Disable the expensive GEMM autotune
-    # and use dynamic compilation to improve robustness.
-    try:
-        import torch._inductor.config as inductor_config
-        inductor_config.max_autotune_gemm = False
-    except Exception:
-        pass
-    model = torch.compile(model, dynamic=True, mode="default")
+    model = torch.compile(model, dynamic=False)
 depth = model.config.n_layer
 num_flops_per_token = model.estimate_flops()
 tokens_per_fwdbwd = args.device_batch_size * args.max_seq_len # tokens per iteration for a single rank
@@ -668,7 +632,7 @@ while True:
         x = x.to(device=device, non_blocking=args.pin_memory)
         y = y.to(device=device, non_blocking=args.pin_memory)
         img_feats = img_feats.to(device=device, dtype=torch.float32, non_blocking=args.pin_memory)
-        print("****************using device:", device)
+        
         h2d_end.record()
         h2d_events.append((h2d_start, h2d_end))
 
@@ -679,22 +643,7 @@ while True:
             # When `--torch-compile` is used, prefer the original (uncompiled)
             # model for image-conditioned forwards to avoid compiled kernel issues.
             if compile_enabled:
-                print0("about to try running with compiled model...")
-                # 1. Verify inputs
-                assert x.device.type == 'cuda', "x is on CPU!"
-                assert y.device.type == 'cuda', "y is on CPU!"
-                assert img_feats.device.type == 'cuda', "img_feats is on CPU!"
-
-                # 2. Hunt for rogue parameters
-                for name, param in model.named_parameters():
-                    if param.device.type == 'cpu':
-                        print(f"🚨 ROGUE CPU PARAMETER CAUGHT: {name}")
-
-                # 3. Hunt for rogue buffers (like cos/sin or causal masks)
-                for name, buf in model.named_buffers():
-                    if buf.device.type == 'cpu':
-                        print(f"🚨 ROGUE CPU BUFFER CAUGHT: {name}")
-                loss = model(x, y, loss_reduction='mean', image_embeddings=img_feats)
+                loss = orig_model(x, y, loss_reduction='mean', image_embeddings=img_feats)
             else:
                 loss = model(x, y, loss_reduction='mean', image_embeddings=img_feats)
         train_loss = loss.detach() # for logging
@@ -709,8 +658,6 @@ while True:
         dataloader_wait_ms += (time.perf_counter() - dataloader_wait_start) * 1000
         
         progress = max(progress, approx_progress) # only increase progress monotonically
-    # 
-    synchronize()
     h2d_transfer_ms = sum(start.elapsed_time(end) for start, end in h2d_events)
     # step the optimizer
     lrm = get_lr_multiplier(progress)
