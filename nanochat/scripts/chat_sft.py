@@ -85,6 +85,7 @@ parser.add_argument("--final-lr-frac", type=float, default=0.0, help="final LR a
 # Evaluation
 parser.add_argument("--eval-every", type=int, default=200, help="evaluate val bpb every N steps (-1 = disable)")
 parser.add_argument("--eval-tokens", type=int, default=40*524288, help="number of tokens to evaluate val loss on")
+parser.add_argument("--num-previews", type=int, default=10, help="number of preview generations to produce during each evaluation")
 # Data mixture
 parser.add_argument("--mmlu-epochs", type=int, default=3, help="number of epochs of MMLU in training mixture (teaches Multiple Choice)")
 parser.add_argument("--gsm8k-epochs", type=int, default=4, help="number of epochs of GSM8K in training mixture (teaches Math and Tool Use)")
@@ -489,93 +490,96 @@ while True:
         if master_process:
             import random
             total_val_generation_time = 0.0
-            
-            num_preview = 20  
-            val_indices = random.sample(range(len(val_dataset)), min(num_preview, len(val_dataset)))
-            
+
+            # Generate N previews for the SAME prompt+image (controlled by CLI `--num-previews`)
+            num_preview = args.num_previews
             semantic_scores = []
-            
-            for idx in val_indices:
-                preview_sample = val_dataset[idx]
-                preview_image_id = preview_sample.get("image_id", "unknown")
-                # Load image embedding for this sample from the val embeddings dir
-                emb_dir_to_use = embeddings_val_dir
-                candidate = os.path.join(emb_dir_to_use, f"{preview_image_id}.pt")
-                if not os.path.exists(candidate):
-                    print0(f"[Preview] Embedding not found for image_id={preview_image_id} in {emb_dir_to_use}, skipping.")
-                    continue
+
+            # pick a single sample from the val set to preview
+            preview_idx = random.randrange(len(val_dataset))
+            preview_sample = val_dataset[preview_idx]
+            preview_image_id = preview_sample.get("image_id", "unknown")
+            emb_dir_to_use = embeddings_val_dir
+            candidate = os.path.join(emb_dir_to_use, f"{preview_image_id}.pt")
+
+            if not os.path.exists(candidate):
+                print0(f"[Preview] Embedding not found for image_id={preview_image_id} in {emb_dir_to_use}, skipping.")
+                avg_val_generation_time = 0.0
+            else:
                 preview_img_emb = torch.load(candidate, map_location=device)
                 if preview_img_emb.dim() == 3 and preview_img_emb.shape[0] == 1:
                     preview_img_emb = preview_img_emb.squeeze(0)
                 if preview_img_emb.dim() == 1:
                     preview_img_emb = preview_img_emb.unsqueeze(0)
-                preview_img_emb = preview_img_emb.unsqueeze(0).to(device=device, dtype=torch.float32).contiguous()  # (1, num_img_tokens, 768)
+                preview_img_emb = preview_img_emb.unsqueeze(0).to(device=device, dtype=torch.float32).contiguous()
 
-                # 1. Create the prompt: ONLY the user side of the conversation
+                # Build prompt with image placeholder tokens
                 eval_conv = {"messages": [{"role": "user", "content": "Describe this image."}]}
                 prompt_ids, _ = tokenizer.render_conversation(eval_conv)
                 bos_id = prompt_ids.pop(0)
                 num_img_tokens = preview_img_emb.shape[1]
                 prompt_ids = [bos_id] + ([bos_id] * num_img_tokens) + prompt_ids
 
-                # 2. Generate caption
-                generated_ids = []
-                
-                # Get the ID for your stop token
                 stop_token_id = tokenizer.encode_special("<|assistant_end|>")
-                
-                # Use Engine for preview generation (Engine can itself fallback to model.generate when requested)
+
                 engine = Engine(model, tokenizer)
+                # enable kv-cache if requested or if generating multiple previews in parallel
+                local_use_kv = getattr(args, 'kv_cache', False) or (num_preview > 1)
+                if num_preview > 1 and not getattr(args, 'kv_cache', False):
+                    print0("Note: enabling KV cache for multi-sample preview generation")
+
+                # Generate `num_preview` parallel samples for the same prompt+image
+                generated_ids_lists = [[] for _ in range(num_preview)]
+                finished = [False] * num_preview
                 val_start_time = time.time()
                 for token_column, token_masks in engine.generate(
                     prompt_ids,
-                    num_samples=1,
-                    max_tokens=512,
+                    num_samples=num_preview,
+                    max_tokens=128,
                     temperature=1.0,
                     top_k=None,
                     seed=42,
                     image_embeddings=preview_img_emb[:1],
-                    use_kv_cache=args.kv_cache,
+                    use_kv_cache=local_use_kv,
                 ):
-                    token = token_column[0]
-                    # Check if the model wants to stop BEFORE adding the token to the list
-                    # if token == stop_token_id:
-                    #     break
-                    generated_ids.append(token)
-                total_val_generation_time += time.time() - val_start_time
-                
-                    
-                # [1:] to skip <|assistant_start|>
-                generated_caption = tokenizer.decode(generated_ids[1:]).strip()
+                    for i in range(num_preview):
+                        if finished[i]:
+                            continue
+                        token = token_column[i]
+                        if token == stop_token_id:
+                            finished[i] = True
+                            continue
+                        generated_ids_lists[i].append(token)
+                        
+                    if all(finished):
+                        break
 
-                # 3. Print the ground-truth (target) caption
+                total_val_generation_time += time.time() - val_start_time
+
+                # Compute similarity for each generated sample against the single target
                 target_caption = ""
                 for msg in preview_sample.get("messages", []):
                     if msg.get("role") == "assistant":
                         target_caption = msg.get("content", "")
                         break
-                        
-                # Calculate semantic cosine similarity
-                sim_score = 0.0
-                if target_caption:
-                    emb_generated_caption = semantic_model.encode(generated_caption, convert_to_tensor=True, device='cpu', show_progress_bar=False)
-                    emb_target_caption = semantic_model.encode(target_caption, convert_to_tensor=True, device='cpu', show_progress_bar=False)
-                    sim_score = util.cos_sim(emb_generated_caption, emb_target_caption).item()
-                    semantic_scores.append(sim_score)
-                else:
-                    exit("No ground-truth caption found for this sample, cannot compute semantic similarity.")
 
-                # only print 5 generated captions
-                if len(semantic_scores) <= 5:
-                    print("----------------------------------")
-                    print0(f"Step {step:05d} | Validation image_id: ~as7629/multimodal-nanochat/COCO_data/val2017/000000{preview_image_id}.jpg")
-                    print0(f"  Generated: {generated_caption}")
-                    print0(f"  Target:    {target_caption}")
-                    print0(f"  Sim Score: {sim_score:.4f}")
-                    print("----------------------------------\n")
-            
-            avg_val_generation_time = total_val_generation_time / num_preview
-                    
+                for i in range(num_preview):
+                    gen_ids = generated_ids_lists[i]
+                    generated_caption = tokenizer.decode(gen_ids[1:]).strip() if len(gen_ids) > 0 else ""
+                    if target_caption:
+                        emb_generated_caption = semantic_model.encode(generated_caption, convert_to_tensor=True, device='cpu', show_progress_bar=False)
+                        emb_target_caption = semantic_model.encode(target_caption, convert_to_tensor=True, device='cpu', show_progress_bar=False)
+                        sim_score = util.cos_sim(emb_generated_caption, emb_target_caption).item()
+                        semantic_scores.append(sim_score)
+                    if i < 5:
+                        print("----------------------------------")
+                        print0(f"Step {step:05d} | Validation image_id: ~as7629/multimodal-nanochat/COCO_data/val2017/000000{preview_image_id}.jpg")
+                        print0(f"  Generated [{i}]: {generated_caption}")
+                        print0(f"  Target:    {target_caption}")
+                        print0(f"  Sim Score: {semantic_scores[-1]:.4f}")
+
+                avg_val_generation_time = total_val_generation_time / num_preview
+                
         if val_bpb < min_val_bpb:
             min_val_bpb = val_bpb
         
@@ -588,8 +592,9 @@ while True:
         
         if semantic_scores:
             avg_sim_score = sum(semantic_scores) / len(semantic_scores)
+            print0(f"Average semantic similarity score across {num_preview} previews: {avg_sim_score:.4f}")
             wandb_run.log({
-                "val/semantic_similarity": avg_sim_score
+                "val/avg_semantic_similarity": avg_sim_score
             }, step=step)
         
         model.train()

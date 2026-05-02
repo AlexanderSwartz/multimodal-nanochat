@@ -439,18 +439,25 @@ class GPT(nn.Module):
         x = norm(x)
         
         # --- NEW MULTIMODAL INJECTION ---
-        # The placeholder approach means you insert fake, dummy tokens (like -1 or a special <image> ID) 
-        # into your text input sequence exactly where you want the image to appear. 
-        # During the forward pass, you intercept the sequence of text embeddings and 
-        # physically overwrite the vectors at those placeholder positions with your actual projected visual vectors.
-        if image_embeddings is not None:
-            # 1. Project the CLIP embeddings to match nanochat's n_embd
-            img_feats = self.vision_proj(image_embeddings) # Shape: (B, num_image_tokens, n_embd)
-            
-            # 2. Overwrite the placeholder tokens in `x`
-            # Assuming you put the dummy tokens right after the <|bos|> token at index 1
+        # 1. ONLY inject during prefill (when sequence length > 1).
+        # During cached decoding (T=1), the image is already in the KV cache!
+        if image_embeddings is not None and x.shape[1] > 1:
+            # Project the CLIP embeddings
+            img_feats = self.vision_proj(image_embeddings)
+            img_feats = img_feats.to(x.dtype) 
             num_img_tokens = img_feats.shape[1]
-            x[:, 1:1+num_img_tokens, :] = img_feats
+            
+            # 2. If generating multiple samples for 1 image, duplicate the image 
+            # to match the text batch size (e.g. from batch size 1 to batch size 4)
+            if img_feats.shape[0] != x.shape[0]:
+                img_feats = img_feats.expand(x.shape[0], -1, -1)
+            
+            # Rebuild the sequence out-of-place
+            part1 = x[:, :1, :]                       
+            part2 = img_feats                         
+            part3 = x[:, 1+num_img_tokens:, :]        
+            
+            x = torch.cat([part1, part2, part3], dim=1).contiguous()
         # --------------------------------
 
         # Smear: mix previous token's embedding into current position (cheap bigram info)
