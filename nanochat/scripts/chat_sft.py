@@ -26,10 +26,12 @@ import torch
 from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, get_base_dir, autodetect_device_type, get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized
 from nanochat.tokenizer import get_token_bytes
 from nanochat.checkpoint_manager import save_checkpoint, load_model, load_optimizer_state
+from nanochat.vision import compute_image_embedding_for_id
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.engine import Engine
 import torch.distributed as dist
 from nanochat.flash_attention import HAS_FA3
+from torch.utils.data import DataLoader, Dataset
 
 from tasks.common import TaskMixture
 from tasks.gsm8k import GSM8K
@@ -87,6 +89,10 @@ parser.add_argument("--eval-every", type=int, default=200, help="evaluate val bp
 parser.add_argument("--eval-tokens", type=int, default=40*524288, help="number of tokens to evaluate val loss on")
 parser.add_argument("--num-previews", type=int, default=10, help="number of preview generations to produce during each evaluation")
 parser.add_argument("--preview-batch-size", type=int, default=8, help="chunk size for batched preview generation to limit GPU memory")
+parser.add_argument("--compute-embeddings", action='store_true', help="Compute image embeddings on-the-fly instead of loading .pt files")
+parser.add_argument("--embed-num-tokens", type=int, default=50, help="Number of image token rows to expand pooled embedding to (when computing on-the-fly)")
+# `embed_target_dim` is fixed to 768; remove CLI override.
+parser.add_argument("--embed-num-workers", type=int, default=0, help="Number of DataLoader workers for on-the-fly embedding computation")
 # Data mixture
 parser.add_argument("--mmlu-epochs", type=int, default=3, help="number of epochs of MMLU in training mixture (teaches Multiple Choice)")
 parser.add_argument("--gsm8k-epochs", type=int, default=4, help="number of epochs of GSM8K in training mixture (teaches Math and Tool Use)")
@@ -227,6 +233,7 @@ print0(f"COCO val JSONL: {args.val_jsonl}")
 train_dataset = CustomJSON(filepath=args.train_jsonl)
 val_dataset = CustomJSON(filepath=args.val_jsonl)
 print0(f"COCO dataset sizes: train={len(train_dataset):,} val={len(val_dataset):,}")
+# When --compute-embeddings is set we compute embeddings on-the-fly (worker or inline).
 # DataLoader is defined here, it emits inputs, targets : 2D tensors of shape (device_batch_size, max_seq_len)
 # A big problem is that we don't know the final num_iterations in advance. So we create
 # these two global variables and update them from within the data generator.
@@ -285,11 +292,69 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
     consumed = ddp_rank  # Track actual consumption separately from buffering
     epoch = 1
     it = 0  # iteration counter
+    # Optionally compute embeddings inside DataLoader workers instead of main process
+    compute_in_worker = args.compute_embeddings and args.embed_num_workers > 0
+    worker_iter = None
+    if compute_in_worker:
+        class WorkerConvDataset(Dataset):
+            def __init__(self, base_dataset, repo_root, split, num_tokens, target_dim, default_emb):
+                self.base = base_dataset
+                self.repo_root = repo_root
+                self.split = split
+                self.num_tokens = num_tokens
+                self.target_dim = target_dim
+                self.default_emb = default_emb
+
+            def __len__(self):
+                return len(self.base)
+
+            def __getitem__(self, idx):
+                conv = self.base[idx]
+                img_id = conv.get('image_id')
+                if img_id is None:
+                    emb = self.default_emb.clone()
+                else:
+                    try:
+                        emb = compute_image_embedding_for_id(
+                            img_id,
+                            self.repo_root,
+                            split=self.split,
+                            num_tokens=self.num_tokens,
+                            target_dim=self.target_dim,
+                        )
+                    except Exception:
+                        emb = self.default_emb.clone()
+                new_conv = dict(conv)
+                new_conv['_computed_image_emb'] = emb
+                return new_conv
+
+        worker_ds = WorkerConvDataset(dataset, repo_root, split, args.embed_num_tokens, 768, default_image_emb)
+        worker_dl = DataLoader(worker_ds, batch_size=1, shuffle=False, num_workers=args.embed_num_workers)
+        worker_iter = iter(worker_dl)
 
     def refill_buffer():
         nonlocal cursor, epoch
         while len(conv_buffer) < buffer_size:
-            conversation = dataset[cursor]
+            if compute_in_worker:
+                try:
+                    batch = next(worker_iter)
+                except StopIteration:
+                    worker_iter = iter(DataLoader(worker_ds, batch_size=1, shuffle=False, num_workers=args.embed_num_workers))
+                    batch = next(worker_iter)
+                # Unwrap the single-item batch into a conversation dict
+                if isinstance(batch, dict):
+                    conversation = {}
+                    for k, v in batch.items():
+                        if isinstance(v, (list, tuple)):
+                            conversation[k] = v[0]
+                        elif isinstance(v, torch.Tensor):
+                            conversation[k] = v[0]
+                        else:
+                            conversation[k] = v
+                else:
+                    conversation = batch[0]
+            else:
+                conversation = dataset[cursor]
             ids, mask = tokenizer.render_conversation(conversation)
             
             # --- NANOCHAT_V ---
@@ -336,19 +401,38 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
                     candidate = os.path.join(emb_dir_to_use, f"{img_id}.pt")
                     if os.path.exists(candidate):
                         emb_path = candidate
-                if emb_path is None:
-                    if strict_image_embeddings and is_image_task:
-                        raise FileNotFoundError(
-                            f"Embedding file not found for image_id {img_id} in {emb_dir_to_use}\n"
-                            "Run the CLIP_COCO_loader.ipynb to generate embeddings in that directory"
-                        )
-                    print0(f"Warning: embedding for image_id {img_id} not found in {emb_dir_to_use}; using default embedding")
-                    image_emb = default_image_emb.clone()
+                if args.compute_embeddings:
+                    # Prefer worker-computed embedding if running with workers; otherwise compute on-the-fly
+                    if compute_in_worker and conversation.get('_computed_image_emb') is not None:
+                        image_emb = conversation.get('_computed_image_emb')
+                    else:
+                        try:
+                            image_emb = compute_image_embedding_for_id(
+                                img_id,
+                                repo_root,
+                                split=split,
+                                num_tokens=args.embed_num_tokens,
+                                target_dim=768,
+                            )
+                        except Exception as e:
+                            if strict_image_embeddings and is_image_task:
+                                raise
+                            print0(f"Warning: failed to compute embedding for image_id {img_id}: {e}; using default embedding")
+                            image_emb = default_image_emb.clone()
                 else:
-                    image_emb = torch.load(emb_path, map_location="cpu")
-                    # Standardize shape to (seq_len, n_embd) in case the saved tensor has a batch dim of 1
-                    if image_emb.dim() == 3 and image_emb.shape[0] == 1:
-                        image_emb = image_emb.squeeze(0)
+                    if emb_path is None:
+                        if strict_image_embeddings and is_image_task:
+                            raise FileNotFoundError(
+                                f"Embedding file not found for image_id {img_id} in {emb_dir_to_use}\n"
+                                "Run the CLIP_COCO_loader.ipynb to generate embeddings in that directory"
+                            )
+                        print0(f"Warning: embedding for image_id {img_id} not found in {emb_dir_to_use}; using default embedding")
+                        image_emb = default_image_emb.clone()
+                    else:
+                        image_emb = torch.load(emb_path, map_location="cpu")
+                        # Standardize shape to (seq_len, n_embd) in case the saved tensor has a batch dim of 1
+                        if image_emb.dim() == 3 and image_emb.shape[0] == 1:
+                            image_emb = image_emb.squeeze(0)
 
             # Ensure 2D shape (num_img_tokens, dim)
             if image_emb.dim() == 1:
