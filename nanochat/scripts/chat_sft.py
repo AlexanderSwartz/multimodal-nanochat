@@ -76,6 +76,12 @@ parser.add_argument("--num-iterations", type=int, default=-1, help="number of op
 parser.add_argument("--max-seq-len", type=int, default=None, help="max context length (default: inherit from pretrain)")
 parser.add_argument("--device-batch-size", type=int, default=None, help="per-device batch size (default: inherit from pretrain)")
 parser.add_argument("--total-batch-size", type=int, default=None, help="total batch size in tokens (default: inherit from pretrain)")
+# Online image embedding
+parser.add_argument("--compute-embeddings", action='store_true', help="Compute image embeddings online instead of loading .pt files")
+parser.add_argument("--embed-num-tokens", type=int, default=50, help="Number of image token rows to expand pooled embedding to (when computing on-the-fly)")
+# `embed_target_dim` is fixed to 768; remove CLI override.
+parser.add_argument("--num-workers", type=int, default=0, help="Number of DataLoader workers for online embedding computation")
+parser.add_argument("--persistent-workers", action='store_true', help="Use persistent DataLoader workers for online embedding computation")
 # Optimization (default: inherit from pretrained checkpoint)
 parser.add_argument("--embedding-lr", type=float, default=None, help="learning rate for embedding parameters (Adam) (default: inherit from pretrain)")
 parser.add_argument("--unembedding-lr", type=float, default=None, help="learning rate for unembedding parameters (Adam) (default: inherit from pretrain)")
@@ -89,10 +95,6 @@ parser.add_argument("--eval-every", type=int, default=200, help="evaluate val bp
 parser.add_argument("--eval-tokens", type=int, default=40*524288, help="number of tokens to evaluate val loss on")
 parser.add_argument("--num-previews", type=int, default=10, help="number of preview generations to produce during each evaluation")
 parser.add_argument("--preview-batch-size", type=int, default=8, help="chunk size for batched preview generation to limit GPU memory")
-parser.add_argument("--compute-embeddings", action='store_true', help="Compute image embeddings on-the-fly instead of loading .pt files")
-parser.add_argument("--embed-num-tokens", type=int, default=50, help="Number of image token rows to expand pooled embedding to (when computing on-the-fly)")
-# `embed_target_dim` is fixed to 768; remove CLI override.
-parser.add_argument("--embed-num-workers", type=int, default=0, help="Number of DataLoader workers for on-the-fly embedding computation")
 # Data mixture
 parser.add_argument("--mmlu-epochs", type=int, default=3, help="number of epochs of MMLU in training mixture (teaches Multiple Choice)")
 parser.add_argument("--gsm8k-epochs", type=int, default=4, help="number of epochs of GSM8K in training mixture (teaches Math and Tool Use)")
@@ -103,6 +105,7 @@ parser.add_argument("--test-jsonl", type=str, default=default_test_jsonl, help="
 # Debugging flags
 parser.add_argument("--disable-image", action='store_true', help="Disable using image embeddings during training/eval (text-only debug)")
 parser.add_argument("--kv-cache", action='store_true', help="Use KV cache (Engine) for preview generation (faster inference)")
+parser.add_argument("--wandb-group", type=str, default=None, help="WandB group name to assign this run to")
 args = parser.parse_args()
 user_config = vars(args).copy()
 user_config["COMPUTE_DTYPE"] = str(COMPUTE_DTYPE)
@@ -127,7 +130,7 @@ else:
 
 # wandb logging init
 use_dummy_wandb = args.run == "dummy" or not master_process
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="Multimodal-Nanochat", name=args.run, config=user_config)
+wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="Multimodal-Nanochat", name=args.run, config=user_config, group=args.wandb_group)
 
 # Flash Attention status
 if not HAS_FA3:
@@ -293,7 +296,7 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
     epoch = 1
     it = 0  # iteration counter
     # Optionally compute embeddings inside DataLoader workers instead of main process
-    compute_in_worker = args.compute_embeddings and args.embed_num_workers > 0
+    compute_in_worker = args.compute_embeddings and args.num_workers > 0
     worker_iter = None
     if compute_in_worker:
         class WorkerConvDataset(Dataset):
@@ -329,7 +332,14 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
                 return new_conv
 
         worker_ds = WorkerConvDataset(dataset, repo_root, split, args.embed_num_tokens, 768, default_image_emb)
-        worker_dl = DataLoader(worker_ds, batch_size=1, shuffle=False, num_workers=args.embed_num_workers, collate_fn=lambda x: x[0])
+        worker_dl = DataLoader(
+            worker_ds,
+            batch_size=1,
+            shuffle=False,
+            num_workers=args.num_workers,
+            collate_fn=lambda x: x[0],
+            persistent_workers=args.persistent_workers,
+        )
         worker_iter = iter(worker_dl)
 
     def refill_buffer():
@@ -339,7 +349,13 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
                 try:
                     batch = next(worker_iter)
                 except StopIteration:
-                    worker_iter = iter(DataLoader(worker_ds, batch_size=1, shuffle=False, num_workers=args.embed_num_workers))
+                    worker_iter = iter(DataLoader(
+                        worker_ds,
+                        batch_size=1,
+                        shuffle=False,
+                        num_workers=args.num_workers,
+                        persistent_workers=args.persistent_workers,
+                    ))
                     batch = next(worker_iter)
                 conversation = batch
             else:
@@ -835,6 +851,7 @@ while True:
     if step > 10:
         total_training_time += dt # only count the time after the first 10 steps
     print0(f"step {step:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.2f} | epoch: {current_epoch} | total time: {total_training_time/60:.2f}m")
+    print0(f"  dataloader wait: {dataloader_wait_ms:.2f}ms | h2d transfer: {h2d_transfer_ms:.2f}ms")
     dataloader_fraction = dataloader_wait_ms / (dt*1000) if dt>0 else 0
     if step % 10 == 0:
         wandb_run.log({
