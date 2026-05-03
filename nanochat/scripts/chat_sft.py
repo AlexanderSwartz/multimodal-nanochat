@@ -329,11 +329,11 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
                 return new_conv
 
         worker_ds = WorkerConvDataset(dataset, repo_root, split, args.embed_num_tokens, 768, default_image_emb)
-        worker_dl = DataLoader(worker_ds, batch_size=1, shuffle=False, num_workers=args.embed_num_workers)
+        worker_dl = DataLoader(worker_ds, batch_size=1, shuffle=False, num_workers=args.embed_num_workers, collate_fn=lambda x: x[0])
         worker_iter = iter(worker_dl)
 
     def refill_buffer():
-        nonlocal cursor, epoch
+        nonlocal cursor, epoch, worker_iter
         while len(conv_buffer) < buffer_size:
             if compute_in_worker:
                 try:
@@ -341,18 +341,7 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
                 except StopIteration:
                     worker_iter = iter(DataLoader(worker_ds, batch_size=1, shuffle=False, num_workers=args.embed_num_workers))
                     batch = next(worker_iter)
-                # Unwrap the single-item batch into a conversation dict
-                if isinstance(batch, dict):
-                    conversation = {}
-                    for k, v in batch.items():
-                        if isinstance(v, (list, tuple)):
-                            conversation[k] = v[0]
-                        elif isinstance(v, torch.Tensor):
-                            conversation[k] = v[0]
-                        else:
-                            conversation[k] = v
-                else:
-                    conversation = batch[0]
+                conversation = batch
             else:
                 conversation = dataset[cursor]
             ids, mask = tokenizer.render_conversation(conversation)
