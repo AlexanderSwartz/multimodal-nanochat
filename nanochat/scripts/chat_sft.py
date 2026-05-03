@@ -850,19 +850,18 @@ while True:
     print0(f"step {step:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.2f} | epoch: {current_epoch} | total time: {total_training_time/60:.2f}m")
     print0(f"  dataloader wait: {dataloader_wait_ms:.2f}ms | h2d transfer: {h2d_transfer_ms:.2f}ms")
     dataloader_fraction = dataloader_wait_ms / (dt*1000) if dt>0 else 0
-    if step % 10 == 0:
-        wandb_run.log({
-            "total_training_flops": flops_so_far,
-            "total_training_time": total_training_time,
-            "train/loss": debiased_smooth_loss,
-            "train/dt": dt,
-            "train/tok_per_sec": tok_per_sec,
-            "train/mfu": mfu,
-            "train/epoch": current_epoch,
-            "train/dataloader_wait_ms": dataloader_wait_ms,
-            "train/h2d_transfer_ms": h2d_transfer_ms,
-            "train/dataloader_fraction": dataloader_fraction
-        }, step=step)
+    wandb_run.log({
+        "total_training_flops": flops_so_far,
+        "total_training_time": total_training_time,
+        "train/loss": debiased_smooth_loss,
+        "train/dt": dt,
+        "train/tok_per_sec": tok_per_sec,
+        "train/mfu": mfu,
+        "train/epoch": current_epoch,
+        "train/dataloader_wait_ms": dataloader_wait_ms,
+        "train/h2d_transfer_ms": h2d_transfer_ms,
+        "train/dataloader_fraction": dataloader_fraction
+    }, step=step)
 
     # The garbage collector spends ~500ms scanning for cycles quite frequently.
     # We manually manage it to avoid these pauses during training.
