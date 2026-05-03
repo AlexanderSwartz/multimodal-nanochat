@@ -553,6 +553,7 @@ min_val_bpb = float("inf")
 smooth_train_loss = 0 # EMA of training loss
 ema_beta = 0.9 # EMA decay factor
 total_training_time = 0 # total wall-clock time of training
+warmup_time = 0.0 # sum of dt for the first 10 iterations (seconds)
 step = 0
 while True:
     flops_so_far = num_flops_per_token * args.total_batch_size * step
@@ -848,8 +849,9 @@ while True:
     tok_per_sec = int(args.total_batch_size / dt)
     flops_per_sec = num_flops_per_token * args.total_batch_size / dt
     mfu = 100 * flops_per_sec / (gpu_peak_flops * ddp_world_size)
-    if step > 10:
-        total_training_time += dt # only count the time after the first 10 steps
+    total_training_time += dt
+    if step <= 10:
+        warmup_time += dt
     print0(f"step {step:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.2f} | epoch: {current_epoch} | total time: {total_training_time/60:.2f}m")
     print0(f"  dataloader wait: {dataloader_wait_ms:.2f}ms | h2d transfer: {h2d_transfer_ms:.2f}ms")
     dataloader_fraction = dataloader_wait_ms / (dt*1000) if dt>0 else 0
@@ -887,7 +889,9 @@ print0(f"Minimum validation bpb: {min_val_bpb:.4f}")
 # Log summary to wandb 
 if wandb_run is not None:
     wandb_run.summary["peak_memory_mib"] = peak_memory_mib
-    wandb_run.summary["total_training_time_min"] = total_training_time/60
+    wandb_run.summary["total_training_time"]
+    wandb_run.summary["warmup_time"] = warmup_time
+    wandb_run.summary["total_hot_time"] = total_training_time - warmup_time
     wandb_run.summary["min_val_bpb"] = min_val_bpb
 
 # Log to report
