@@ -349,13 +349,7 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
                 try:
                     batch = next(worker_iter)
                 except StopIteration:
-                    worker_iter = iter(DataLoader(
-                        worker_ds,
-                        batch_size=1,
-                        shuffle=False,
-                        num_workers=args.num_workers,
-                        persistent_workers=args.persistent_workers,
-                    ))
+                    worker_iter = iter(worker_dl)
                     batch = next(worker_iter)
                 conversation = batch
             else:
@@ -461,7 +455,8 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
                 cursor = cursor % dataset_size
                 epoch += 1
                 # Note: last_step is now triggered based on consumption, not fetching
-
+            approx_progress = (cursor + (epoch - 1) * dataset_size) / (args.num_iterations * args.total_batch_size)
+            
     while True:
         rows = []
         mask_rows = []
