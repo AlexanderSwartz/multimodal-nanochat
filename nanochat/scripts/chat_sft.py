@@ -23,6 +23,8 @@ try:
 except Exception:
     wandb = None
 import torch
+import torch.profiler as torch_profiler
+from torch.profiler import ProfilerActivity, tensorboard_trace_handler, _ExperimentalConfig
 from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, get_base_dir, autodetect_device_type, get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized
 from nanochat.tokenizer import get_token_bytes
 from nanochat.checkpoint_manager import save_checkpoint, load_model, load_optimizer_state
@@ -41,6 +43,7 @@ from tasks.customjson import CustomJSON
 from tasks.spellingbee import SimpleSpelling, SpellingBee
 
 from sentence_transformers import SentenceTransformer, util
+import contextlib
 
 # load model to CPU to keep separate from GPU memory stats
 semantic_model = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
@@ -106,6 +109,7 @@ parser.add_argument("--test-jsonl", type=str, default=default_test_jsonl, help="
 parser.add_argument("--disable-image", action='store_true', help="Disable using image embeddings during training/eval (text-only debug)")
 parser.add_argument("--kv-cache", action='store_true', help="Use KV cache (Engine) for preview generation (faster inference)")
 parser.add_argument("--wandb-group", type=str, default=None, help="WandB group name to assign this run to")
+parser.add_argument("--profile", action='store_true', help="Run with PyTorch profiler")
 args = parser.parse_args()
 user_config = vars(args).copy()
 user_config["COMPUTE_DTYPE"] = str(COMPUTE_DTYPE)
@@ -127,6 +131,22 @@ if device_type == "cuda":
     print0(f"GPU: {gpu_device_name} | Peak FLOPS (BF16): {gpu_peak_flops:.2e}")
 else:
     gpu_peak_flops = float('inf')  # MFU not meaningful for CPU/MPS
+
+# Profiler setup (only now that `device` is available)
+if args.profile:
+    activities = [torch_profiler.ProfilerActivity.CPU]
+    if device.type == "cuda":
+        activities.append(torch_profiler.ProfilerActivity.CUDA)
+    schedule = torch_profiler.schedule(wait=1, warmup=20, active=5, repeat=1)
+    prof_logdir = os.path.join(repo_root, "runs", args.run, "profiler")
+    profiler = torch_profiler.profile(
+        activities=activities,
+        schedule=schedule,
+        on_trace_ready=torch_profiler.tensorboard_trace_handler(prof_logdir),
+        record_shapes=True,
+        profile_memory=True,
+    )
+    profiler.start()
 
 # wandb logging init
 use_dummy_wandb = args.run == "dummy" or not master_process
@@ -777,53 +797,60 @@ while True:
     synchronize()
     t0 = time.time()
     for micro_step in range(grad_accum_steps):
-        h2d_start = torch.cuda.Event(enable_timing=True)
-        h2d_end = torch.cuda.Event(enable_timing=True)
-        h2d_start.record()
-        
-        # manually move tensors so I can time the host->device transfer separately
-        x = x.to(device=device, non_blocking=args.pin_memory)
-        y = y.to(device=device, non_blocking=args.pin_memory)
-        img_feats = img_feats.to(device=device, dtype=torch.float32, non_blocking=args.pin_memory)
-        
-        h2d_end.record()
-        h2d_events.append((h2d_start, h2d_end))
+        with torch_profiler.record_function("H2D Transfer"):
+            h2d_start = torch.cuda.Event(enable_timing=True)
+            h2d_end = torch.cuda.Event(enable_timing=True)
+            h2d_start.record()
+            
+            # manually move tensors so I can time the host->device transfer separately
+            x = x.to(device=device, non_blocking=args.pin_memory)
+            y = y.to(device=device, non_blocking=args.pin_memory)
+            img_feats = img_feats.to(device=device, dtype=torch.float32, non_blocking=args.pin_memory)
+            
+            h2d_end.record()
+            h2d_events.append((h2d_start, h2d_end))
 
         # loss = model(x, y)
-        if disable_image:
-            loss = model(x, y, loss_reduction='mean')
-        else:
-            # Use the eager model for image-conditioned forwards.
-            loss = model(x, y, loss_reduction='mean', image_embeddings=img_feats)
-        train_loss = loss.detach() # for logging
-        loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
-        if scaler is not None:
-            scaler.scale(loss).backward()
-        else:
-            loss.backward()
+        with torch_profiler.record_function("Forward Pass"):
+            if disable_image:
+                loss = model(x, y, loss_reduction='mean')
+            else:
+                # Use the eager model for image-conditioned forwards.
+                loss = model(x, y, loss_reduction='mean', image_embeddings=img_feats)
+                train_loss = loss.detach() # for logging
+                loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
+        
+        with torch_profiler.record_function("Backward Pass"):
+            if scaler is not None:
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
             
-        dataloader_wait_start = time.perf_counter()
-        x, y, img_feats = next(train_loader) # prefetch the next batch while the GPU is busy with forward/backward
-        dataloader_wait_ms += (time.perf_counter() - dataloader_wait_start) * 1000
+        with torch_profiler.record_function("DataLoader Prefetch"):
+            dataloader_wait_start = time.perf_counter()
+            x, y, img_feats = next(train_loader) # prefetch the next batch while the GPU is busy with forward/backward
+            dataloader_wait_ms += (time.perf_counter() - dataloader_wait_start) * 1000
         
         progress = max(progress, approx_progress) # only increase progress monotonically
     h2d_transfer_ms = sum(start.elapsed_time(end) for start, end in h2d_events)
     # step the optimizer
     lrm = get_lr_multiplier(progress)
     muon_momentum = get_muon_momentum(step)
-    for group in optimizer.param_groups:
-        group["lr"] = group["initial_lr"] * lrm
-        if group['kind'] == 'muon':
-            group["momentum"] = muon_momentum
-    if scaler is not None:
-        scaler.unscale_(optimizer)
-        if is_ddp_initialized():
-            for v in scaler._found_inf_per_device(optimizer).values():
-                dist.all_reduce(v, op=dist.ReduceOp.MAX)
-        scaler.step(optimizer)
-        scaler.update()
-    else:
-        optimizer.step()
+    
+    with torch_profiler.record_function("Optimizer Step"):
+        for group in optimizer.param_groups:
+            group["lr"] = group["initial_lr"] * lrm
+            if group['kind'] == 'muon':
+                group["momentum"] = muon_momentum
+        if scaler is not None:
+            scaler.unscale_(optimizer)
+            if is_ddp_initialized():
+                for v in scaler._found_inf_per_device(optimizer).values():
+                    dist.all_reduce(v, op=dist.ReduceOp.MAX)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            optimizer.step()
     model.zero_grad(set_to_none=True)
     synchronize()
     t1 = time.time()
@@ -862,6 +889,11 @@ while True:
         "train/h2d_transfer_ms": h2d_transfer_ms,
         "train/dataloader_fraction": dataloader_fraction
     }, step=step)
+    if args.profile:
+        try:
+            profiler.step()
+        except Exception:
+            pass
 
     # The garbage collector spends ~500ms scanning for cycles quite frequently.
     # We manually manage it to avoid these pauses during training.
@@ -883,10 +915,16 @@ print0(f"Minimum validation bpb: {min_val_bpb:.4f}")
 # Log summary to wandb 
 if wandb_run is not None:
     wandb_run.summary["peak_memory_mib"] = peak_memory_mib
-    wandb_run.summary["total_training_time"]
+    wandb_run.summary["total_training_time"] = total_training_time
     wandb_run.summary["warmup_time"] = warmup_time
     wandb_run.summary["total_hot_time"] = total_training_time - warmup_time
     wandb_run.summary["min_val_bpb"] = min_val_bpb
+
+if args.profile:
+    try:
+        profiler.stop()
+    except Exception:
+        pass
 
 # Log to report
 from nanochat.report import get_report
