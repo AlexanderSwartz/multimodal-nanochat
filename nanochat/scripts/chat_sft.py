@@ -12,6 +12,7 @@ torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- --device-batch-s
 import gc
 import argparse
 import os
+import random
 # Improve CUDA caching allocator configuration to reduce fragmentation.
 # Prefer the CUDA-specific variable; keep the legacy name as a fallback.
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -595,8 +596,9 @@ while True:
         avg_sim_score = None
         val_tok_per_sec = 0.0
         val_mfu = 0.0
+        total_generated_tokens = 0
         if master_process:
-            import random
+            synchronize()
             total_val_generation_time = 0.0
 
             # Generate N previews for DIFFERENT prompt+image pairs (controlled by CLI `--num-previews`)
@@ -693,6 +695,8 @@ while True:
                                 generated_ids_lists[global_i].append(token)
                             if all(finished):
                                 break
+                            
+                    synchronize() # wait for GPU to complete generation
                     total_val_generation_time += time.time() - val_start_time
                     # free chunk device memory
                     try:
