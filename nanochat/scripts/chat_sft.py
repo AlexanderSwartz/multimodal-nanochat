@@ -97,7 +97,7 @@ parser.add_argument("--final-lr-frac", type=float, default=0.0, help="final LR a
 parser.add_argument("--eval-every", type=int, default=200, help="evaluate val bpb every N steps (-1 = disable)")
 parser.add_argument("--eval-tokens", type=int, default=40*524288, help="number of tokens to evaluate val loss on")
 parser.add_argument("--num-previews", type=int, default=10, help="number of preview generations to produce during each evaluation")
-parser.add_argument("--preview-batch-size", type=int, default=8, help="chunk size for batched preview generation to limit GPU memory")
+parser.add_argument("--eval-batch-size", type=int, default=8, help="chunk size for batched preview generation")
 # Data mixture
 parser.add_argument("--mmlu-epochs", type=int, default=3, help="number of epochs of MMLU in training mixture (teaches Multiple Choice)")
 parser.add_argument("--gsm8k-epochs", type=int, default=4, help="number of epochs of GSM8K in training mixture (teaches Math and Tool Use)")
@@ -591,7 +591,10 @@ while True:
                 disable_image=disable_image
             )
         print0(f"Step {step:05d} | Validation bpb: {val_bpb:.4f}")
+        
         avg_sim_score = None
+        val_tok_per_sec = 0.0
+        val_mfu = 0.0
         if master_process:
             import random
             total_val_generation_time = 0.0
@@ -649,7 +652,7 @@ while True:
                 generated_ids_lists = [[] for _ in range(len(samples))]
                 finished = [False] * len(samples)
 
-                preview_batch = max(1, int(getattr(args, 'preview_batch_size', 8)))
+                preview_batch = max(1, int(getattr(args, 'eval_batch_size', 8)))
                 # iterate in chunks so we never prefill more than `preview_batch` rows at once
                 for start in range(0, len(samples), preview_batch):
                     end = min(start + preview_batch, len(samples))
@@ -676,6 +679,8 @@ while True:
                             image_embeddings=sub_embs_device,
                             use_kv_cache=getattr(args, 'kv_cache', False),
                         ):
+                            total_generated_tokens += len(token_column)
+                            
                             # token_column is a list of tokens, one per sub-sample
                             for local_i in range(len(sub_prompts)):
                                 global_i = start + local_i
@@ -739,6 +744,10 @@ while True:
                             print0(f"  Sim Score: {semantic_scores[-1]:.4f}")
 
                 avg_val_generation_time = total_val_generation_time / max(1, len(samples))
+                val_tok_per_sec = total_generated_tokens / total_val_generation_time
+                val_flops_per_sec = num_flops_per_token * val_tok_per_sec
+                # reuse built-in formula for train/mfu
+                val_mfu = 100 * val_flops_per_sec / (gpu_peak_flops * ddp_world_size)
                 
         if val_bpb < min_val_bpb:
             min_val_bpb = val_bpb
@@ -748,6 +757,8 @@ while True:
             "total_training_time": total_training_time,
             "val/bpb": val_bpb,
             "val/avg_generation_time_seconds": avg_val_generation_time,
+            "val/tok_per_sec": val_tok_per_sec,
+            "val/mfu": val_mfu
         }, step=step)
         
         if semantic_scores:
