@@ -582,13 +582,14 @@ while True:
         model.eval()
         val_loader = build_val_loader()
         eval_steps = args.eval_tokens // (args.device_batch_size * args.max_seq_len * ddp_world_size)
-        val_bpb = evaluate_bpb(
-            model,
-            val_loader,
-            eval_steps,
-            token_bytes,
-            disable_image=disable_image
-        )
+        with torch.no_grad():
+            val_bpb = evaluate_bpb(
+                model,
+                val_loader,
+                eval_steps,
+                token_bytes,
+                disable_image=disable_image
+            )
         print0(f"Step {step:05d} | Validation bpb: {val_bpb:.4f}")
         avg_sim_score = None
         if master_process:
@@ -664,28 +665,29 @@ while True:
                     val_start_time = time.time()
                     # sub_prompts should all be the same: 50 tokens of image embedding placeholders followed by the "Describe the image" tokens
                     # sub_embs_device is a tensor of shape (sub_batch_size, max_img_tokens, dim) containing the image embeddings for this chunk
-                    for token_column, token_masks in engine.generate(
-                        sub_prompts,
-                        num_samples=1,
-                        max_tokens=128,
-                        temperature=1.0,
-                        top_k=None,
-                        seed=42,
-                        image_embeddings=sub_embs_device,
-                        use_kv_cache=getattr(args, 'kv_cache', False),
-                    ):
-                        # token_column is a list of tokens, one per sub-sample
-                        for local_i in range(len(sub_prompts)):
-                            global_i = start + local_i
-                            if finished[global_i]:
-                                continue
-                            token = token_column[local_i]
-                            if token == stop_token_id or token == bos_id:
-                                finished[global_i] = True
-                                continue
-                            generated_ids_lists[global_i].append(token)
-                        if all(finished):
-                            break
+                    with torch.no_grad():
+                        for token_column, token_masks in engine.generate(
+                            sub_prompts,
+                            num_samples=1,
+                            max_tokens=128,
+                            temperature=1.0,
+                            top_k=None,
+                            seed=42,
+                            image_embeddings=sub_embs_device,
+                            use_kv_cache=getattr(args, 'kv_cache', False),
+                        ):
+                            # token_column is a list of tokens, one per sub-sample
+                            for local_i in range(len(sub_prompts)):
+                                global_i = start + local_i
+                                if finished[global_i]:
+                                    continue
+                                token = token_column[local_i]
+                                if token == stop_token_id or token == bos_id:
+                                    finished[global_i] = True
+                                    continue
+                                generated_ids_lists[global_i].append(token)
+                            if all(finished):
+                                break
                     total_val_generation_time += time.time() - val_start_time
                     # free chunk device memory
                     try:
