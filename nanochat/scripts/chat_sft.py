@@ -137,14 +137,12 @@ if args.profile:
     activities = [torch_profiler.ProfilerActivity.CPU]
     if device.type == "cuda":
         activities.append(torch_profiler.ProfilerActivity.CUDA)
-    schedule = torch_profiler.schedule(wait=1, warmup=20, active=5, repeat=1)
+    schedule = torch_profiler.schedule(wait=20, warmup=1, active=1, repeat=1)
     prof_logdir = os.path.join(repo_root, "runs", args.run, "profiler")
     profiler = torch_profiler.profile(
         activities=activities,
         schedule=schedule,
         on_trace_ready=torch_profiler.tensorboard_trace_handler(prof_logdir),
-        record_shapes=True,
-        profile_memory=True,
     )
     profiler.start()
 
@@ -872,7 +870,7 @@ while True:
     flops_per_sec = num_flops_per_token * args.total_batch_size / dt
     mfu = 100 * flops_per_sec / (gpu_peak_flops * ddp_world_size)
     total_training_time += dt
-    if step <= 10:
+    if step <= 20:
         warmup_time += dt
     print0(f"step {step:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.2f} | epoch: {current_epoch} | total time: {total_training_time/60:.2f}m")
     print0(f"  dataloader wait: {dataloader_wait_ms:.2f}ms | h2d transfer: {h2d_transfer_ms:.2f}ms")
