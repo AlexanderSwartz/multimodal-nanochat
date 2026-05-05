@@ -99,6 +99,7 @@ parser.add_argument("--eval-every", type=int, default=200, help="evaluate val bp
 parser.add_argument("--eval-tokens", type=int, default=40*524288, help="number of tokens to evaluate val loss on")
 parser.add_argument("--num-previews", type=int, default=10, help="number of preview generations to produce during each evaluation")
 parser.add_argument("--eval-batch-size", type=int, default=8, help="chunk size for batched preview generation")
+parser.add_argument("--eval-only", action='store_true', help="only run evaluation without training")
 # Data mixture
 parser.add_argument("--mmlu-epochs", type=int, default=3, help="number of epochs of MMLU in training mixture (teaches Multiple Choice)")
 parser.add_argument("--gsm8k-epochs", type=int, default=4, help="number of epochs of GSM8K in training mixture (teaches Math and Tool Use)")
@@ -563,6 +564,9 @@ def get_muon_momentum(it):
 
 #   
 x, y, img_feats = next(train_loader)
+# If requested, run evaluation-only (eval at step 0) and then exit without training.
+if getattr(args, 'eval_only', False):
+    last_step = True
 min_val_bpb = float("inf")
 smooth_train_loss = 0 # EMA of training loss
 ema_beta = 0.9 # EMA decay factor
@@ -773,6 +777,10 @@ while True:
             }, step=step)
         
         model.train()
+        
+        if args.eval_only:
+            compute_cleanup()
+            exit(0)
 
     # save checkpoint at the end of the run (all ranks participate so each saves its optimizer shard)
     if last_step:
