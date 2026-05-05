@@ -156,7 +156,7 @@ if not HAS_FA3:
     print0("WARNING: Flash Attention 3 not available, using PyTorch SDPA fallback. Training will be less efficient.")
 
 # Load the model and tokenizer
-model, tokenizer, meta = load_model("base", device, phase="train", model_tag=args.model_tag, step=args.model_step)
+model, tokenizer, meta = load_model("sft", device, phase="train", model_tag=args.model_tag, step=args.model_step)
 
 # Inherit training hyperparameters from pretrained checkpoint (None = inherit, explicit value = override)
 pretrain_user_config = meta.get("user_config", {})
@@ -928,7 +928,7 @@ print0(f"Total training time: {total_training_time/60:.2f}m")
 print0(f"Minimum validation bpb: {min_val_bpb:.4f}")
 
 # Log summary to wandb 
-if wandb_run is not None:
+if not use_dummy_wandb:
     wandb_run.summary["peak_memory_mib"] = peak_memory_mib
     wandb_run.summary["total_training_time"] = total_training_time
     wandb_run.summary["warmup_time"] = warmup_time
