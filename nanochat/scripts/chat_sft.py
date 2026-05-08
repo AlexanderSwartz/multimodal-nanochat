@@ -140,7 +140,7 @@ if args.profile:
     if device.type == "cuda":
         activities.append(torch_profiler.ProfilerActivity.CUDA)
     schedule = torch_profiler.schedule(wait=20, warmup=1, active=1, repeat=1)
-    prof_logdir = os.path.join(repo_root, "runs", args.run, "profiler")
+    prof_logdir = os.path.join(repo_root, "profiler_logs", args.run, "profiler")
     profiler = torch_profiler.profile(
         activities=activities,
         schedule=schedule,

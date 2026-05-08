@@ -1,1 +1,4 @@
 COCO_data/
+profiler_logs/
+wandb/
+chat_sft.py.launch_params
