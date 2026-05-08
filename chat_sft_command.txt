@@ -1,17 +1,16 @@
 python -u -m scripts.chat_sft \
     --train-vision-only \
-    --vision-lr 1e-3 \
-    --total-batch-size 32768 \
+    --vision-lr 1e-2 \
     --load-optimizer 0 \
     --num-iterations 1000 \
-    --device-batch-size 16 \
-    --max-seq-len 128 \
     --eval-every 100 \
+    --num-previews 128 \
+    --max-seq-len 128 \
+    --device-batch-size 16 \
+    --total-batch-size 16384 \
+    --eval-batch-size 16 \
     --eval-tokens 12800 \
     --train-jsonl /home/as7629/multimodal-nanochat/COCO_data/coco_train.jsonl \
     --val-jsonl /home/as7629/multimodal-nanochat/COCO_data/coco_val.jsonl \
-    --eval-batch-size 16 \
-    --pin-memory \
-    --num-previews 128
-    --wandb-group hyperparameter_tuning \
-    --run totalBS32768_lr1e-3
+    --wandb-group totalBS_valdiation_score_iteraction \
+    --run iteration1000_totalBS16384
