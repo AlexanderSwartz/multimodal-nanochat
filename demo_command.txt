@@ -3,7 +3,6 @@ python -u -m scripts.chat_sft \
     --vision-lr 1e-3 \
     --total-batch-size 32768 \
     --load-optimizer 0 \
-    --num-iterations 1 \
     --device-batch-size 16 \
     --max-seq-len 128 \
     --eval-every 100 \
@@ -14,4 +13,5 @@ python -u -m scripts.chat_sft \
     --pin-memory \
     --num-previews 16 \
     --model-tag d20 \
+    --eval-only \
     --model-step 1000
