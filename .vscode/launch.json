@@ -1,0 +1,34 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+           "name": "Debug Chat SFT",
+            "type": "python",
+            "request": "launch",
+            "module": "scripts.chat_sft",
+            "cwd": "${workspaceFolder}/nanochat",
+            "console": "integratedTerminal",
+            "args": [
+                "--train-vision-only",
+                "--vision-lr", "1e-3",
+                "--load-optimizer", "0",
+                "--num-iterations", "250",
+                "--device-batch-size", "16",
+                "--max-seq-len", "256",
+                "--total-batch-size", "32768",
+                "--eval-every", "50",
+                "--eval-tokens", "12800",
+                "--train-jsonl", "/home/as7629/multimodal-nanochat/COCO_data/coco_train.jsonl",
+                "--val-jsonl", "/home/as7629/multimodal-nanochat/COCO_data/coco_val.jsonl",
+                "--pin-memory",
+                "--run", "test_baseline_batched_decoding"
+            ],
+            "env": {
+                "PYTHONUNBUFFERED": "1"
+            }
+        }
+    ]
+}
