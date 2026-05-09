@@ -2,6 +2,20 @@
 
 set -e
 
+# Check for required commands and guide the user to install them if missing.
+missing=0
+for cmd in wget unzip; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        echo "ERROR: required command '$cmd' not found."
+        missing=1
+    fi
+done
+if [ "$missing" -eq 1 ]; then
+    echo "Install on Debian/Ubuntu: sudo apt update && sudo apt install -y wget unzip"
+    echo "Aborting."
+    exit 1
+fi
+
 echo "--- WARNING: This script will download the COCO 2017 dataset, which is approximately 25GB in size. ---"
 echo "--- Please ensure you have sufficient disk space (~40GB). ---"
 
