@@ -21,8 +21,8 @@
                 "--total-batch-size", "32768",
                 "--eval-every", "50",
                 "--eval-tokens", "12800",
-                "--train-jsonl", "/home/as7629/multimodal-nanochat/COCO_data/coco_train.jsonl",
-                "--val-jsonl", "/home/as7629/multimodal-nanochat/COCO_data/coco_val.jsonl",
+                "--train-jsonl", "/COCO_data/coco_train.jsonl",
+                "--val-jsonl", "/COCO_data/coco_val.jsonl",
                 "--pin-memory",
                 "--run", "test_baseline_batched_decoding"
             ],

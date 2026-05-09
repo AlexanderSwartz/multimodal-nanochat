@@ -6,8 +6,8 @@ device_batch_size: 16
 max_seq_len: 128
 eval_every: 100
 eval_tokens: 12800
-train_jsonl: /home/as7629/multimodal-nanochat/COCO_data/coco_train.jsonl
-val_jsonl: /home/as7629/multimodal-nanochat/COCO_data/coco_val.jsonl
+train_jsonl: ../COCO_data/coco_train.jsonl
+val_jsonl: ../COCO_data/coco_val.jsonl
 eval_batch_size: 16
 pin_memory: true
 num_previews: 16

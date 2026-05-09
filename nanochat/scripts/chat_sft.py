@@ -760,7 +760,7 @@ while True:
                     if i < 5:
                         preview_image_id = samples[i].get("image_id", "unknown")
                         print("----------------------------------")
-                        print0(f"Step {step:05d} | Validation image_id: ~as7629/multimodal-nanochat/COCO_data/val2017/000000{preview_image_id}.jpg")
+                        print0(f"Step {step:05d} | Validation image_id: ../COCO_data/val2017/000000{preview_image_id}.jpg")
                         print0(f"  Generated [{i}]: {generated_caption}")
                         print0(f"  Target:    {target_caption}")
                         if semantic_scores:

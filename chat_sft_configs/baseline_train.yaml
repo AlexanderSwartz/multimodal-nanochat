@@ -1,0 +1,21 @@
+# Training Hyperparameters
+train_vision_only: true
+vision_lr: 1e-2
+num_iterations: 30
+total_batch_size: 32768
+device_batch_size: 16
+max_seq_len: 128
+load_optimizer: 0
+
+# Data & Model Pipeline
+train_jsonl: "../COCO_data/coco_train.jsonl"
+val_jsonl: "../COCO_data/coco_val.jsonl"
+compute_embeddings: true
+
+# Evaluation Settings
+eval_every: 15
+eval_tokens: 12800
+
+# Logging & Experiment Tracking (Weights & Biases)
+# wandb_group: "data_pipeline_tuning_offline"
+run: "baseline_online_w0_persistFalse_pinFalse_profileFalse"
