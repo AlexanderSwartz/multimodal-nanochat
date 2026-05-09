@@ -12,7 +12,7 @@ dependencies = [
     "rustbpe>=0.1.0",
     "tokenizers>=0.22.0",
     "uvicorn>=0.36.0",
-    "wandb>=0.21.3",
+    "wandb>=0.26.1",
     "PyYAML==6.0.3",
     "huggingface_hub==1.14.0",
     "pillow==10.4.0",
@@ -24,6 +24,7 @@ dependencies = [
     "numpy==1.26.4",
     "tensorboard-plugin-profile==2.22.1",
     "pycocotools==2.0.11",
+    "seaborn==0.13.2",
 ]
 
 [dependency-groups]
@@ -70,7 +71,9 @@ gpu = [
 ]
 
 [tool.uv]
-default-groups = []
+# Install the 'dev' dependency group by default so developer tools
+# (e.g. ipykernel, matplotlib) are available after `uv sync`.
+default-groups = ["dev"]
 conflicts = [
     [
         { extra = "cpu" },
