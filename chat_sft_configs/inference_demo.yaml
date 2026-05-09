@@ -1,0 +1,16 @@
+train_vision_only: true
+vision_lr: 1e-3
+total_batch_size: 32768
+load_optimizer: 0
+device_batch_size: 16
+max_seq_len: 128
+eval_every: 100
+eval_tokens: 12800
+train_jsonl: /home/as7629/multimodal-nanochat/COCO_data/coco_train.jsonl
+val_jsonl: /home/as7629/multimodal-nanochat/COCO_data/coco_val.jsonl
+eval_batch_size: 16
+pin_memory: true
+num_previews: 16
+model_tag: d20
+eval_only: true
+model_step: 1000

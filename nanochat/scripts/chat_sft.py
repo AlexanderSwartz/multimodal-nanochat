@@ -11,6 +11,7 @@ torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- --device-batch-s
 
 import gc
 import argparse
+import yaml
 import os
 import random
 import time
@@ -106,6 +107,21 @@ parser.add_argument("--disable-image", action='store_true', help="Disable using 
 parser.add_argument("--kv-cache", action='store_true', help="Use KV cache (Engine) for preview generation (faster inference)")
 parser.add_argument("--wandb-group", type=str, default=None, help="WandB group name to assign this run to")
 parser.add_argument("--profile", action='store_true', help="Run with PyTorch profiler")
+parser.add_argument("--config", type=str, default=None, help="Path to a YAML config file. Values set here become defaults; CLI overrides them.")
+
+pre_args, _ = parser.parse_known_args()
+if pre_args.config:
+    cfg_path = pre_args.config
+    if not os.path.exists(cfg_path):
+        raise FileNotFoundError(f"Config file not found: {cfg_path}")
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    if cfg is None:
+        cfg = {}
+    if not isinstance(cfg, dict):
+        raise ValueError(f"Config file {cfg_path} must contain a mapping of option names to values.")
+    parser.set_defaults(**cfg)
+
 args = parser.parse_args()
 user_config = vars(args).copy()
 user_config["COMPUTE_DTYPE"] = str(COMPUTE_DTYPE)
