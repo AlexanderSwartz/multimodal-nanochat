@@ -13,10 +13,6 @@ import gc
 import argparse
 import os
 import random
-# Improve CUDA caching allocator configuration to reduce fragmentation.
-# Prefer the CUDA-specific variable; keep the legacy name as a fallback.
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 import time
 import glob
 try:
@@ -36,15 +32,14 @@ import torch.distributed as dist
 from nanochat.flash_attention import HAS_FA3
 from torch.utils.data import DataLoader, Dataset
 
-from tasks.common import TaskMixture
-from tasks.gsm8k import GSM8K
-from tasks.mmlu import MMLU
-from tasks.smoltalk import SmolTalk
 from tasks.customjson import CustomJSON
-from tasks.spellingbee import SimpleSpelling, SpellingBee
 
 from sentence_transformers import SentenceTransformer, util
-import contextlib
+
+# Improve CUDA caching allocator configuration to reduce fragmentation.
+# Prefer the CUDA-specific variable; keep the legacy name as a fallback.
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
 # load model to CPU to keep separate from GPU memory stats
 semantic_model = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
@@ -54,7 +49,6 @@ default_train_jsonl = os.path.join(repo_root, "COCO_data", "coco_train.jsonl")
 default_val_jsonl = os.path.join(repo_root, "COCO_data", "coco_val_split.jsonl")
 default_test_jsonl = os.path.join(repo_root, "COCO_data", "coco_test.jsonl")
 
-# Discover train/val embeddings directories under COCO_data (embeddings_train, embeddings_val)
 emb_base = os.path.join(repo_root, "COCO_data")
 embeddings_train_dir = os.path.join(emb_base, "embeddings_train")
 embeddings_val_dir = os.path.join(emb_base, "embeddings_val")
@@ -134,7 +128,7 @@ if device_type == "cuda":
 else:
     gpu_peak_flops = float('inf')  # MFU not meaningful for CPU/MPS
 
-# Profiler setup (only now that `device` is available)
+# Profiler setup (only now that device is available)
 if args.profile:
     activities = [torch_profiler.ProfilerActivity.CPU]
     if device.type == "cuda":
@@ -156,7 +150,8 @@ wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="Multimodal-
 if not HAS_FA3:
     print0("WARNING: Flash Attention 3 not available, using PyTorch SDPA fallback. Training will be less efficient.")
 
-# Load the model and tokenizer
+# My saved checkpoints are ~/.cache/nanochat/chatsft_checkpoints
+# Loaded checkpoints are in ~/.cache/nanochat/base_checkpoints
 if getattr(args, 'eval_only', False):
     cache_dir = "sft"
 else: 
