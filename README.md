@@ -80,34 +80,30 @@ The following files were already part of the orignal nanochat repo and were adap
 
 ## 3. Final Results Summary
 
-Replace the numbers below with your measured values. Add or remove rows to fit your study.
+*Note that the baseline and optimized runs for the following results were different depending on the study. See report for full explanation*
 
-| Metric                       | Baseline | Optimized | Δ (Improvement) |
-| ---------------------------- | -------- | --------- | --------------- |
-| Top-1 Accuracy / Task Metric | XX.XX%   | XX.XX%    | ±X.XX pp        |
-| Inference Latency (p50)      | XX.XX ms | XX.XX ms  | XX% faster      |
-| Inference Throughput         | XXX tok/s| XXX tok/s | XX× higher      |
-| Training Time / Epoch        | XX s     | XX s      | XX% faster      |
-| Peak GPU Memory              | XX GB    | XX GB     | XX% less        |
-| Model Size on Disk           | XX MB    | XX MB     | XX% smaller     |
-| Energy / Sample (optional)   | X.XX J   | X.XX J    | XX% less        |
+| Metric                         | Baseline | Optimized | Δ Improvement |
+| ------------------------------ | -------- | --------- | ------------- |
+| Total Training Time (s)        | 289.69   | 33.02     | -88.6%        |
+| Training Throughput (Tok/Sec)  | 1136     | 9909      | 772.27%       |
+| Peak GPU Memory (MiB)          | 19406    | 8244      | -46.92%       |
+| Est. SM Utilization (%)        | 9.54     | 92.22     | 866.67%       |
+| Inference Throughput (Tok/Sec) | 34.31    | 197.08    | 474.41%       |
 
-| Setting | Baseline | Optimized | Δ (Improvement) |
+| Setting | Baseline | Optimized | Δ Improvement |
 | :--- | :--- | :--- | :--- |
-| **Pinned Memory** | False | True | Enabled (Faster Transfer) |
-| **Persistent Workers** | False | True | Enabled (Lower Overhead) |
-| **Num Workers** | 0 | 4 | 4x Increase |
-| **Time of Image Embedding Computation** | Online | Offline | Pre-computed (Zero Runtime Cost) |
-| **Device Batch Size** | 16 | 16 | - (No Change) |
-| **Learning Rate** | 1e-4 | 1e-2 | 100x Increase |
-| **Precision** | FP32 | BF16 | 50% Bit-width (Memory Savings) |
-| **Training Iterations** | 1,000 | 500 | 50% Fewer Steps |
-| **Evaluation Batch Size** | 8 | 16 | 2x Throughput |
+| **Pinned Memory** | False | False | -1.95% Training Time |
+| **Num Workers** | 0 | 4 | -26.74% Training Time |
+| **Time of Image Embedding Computation** | Online | Offline | -83.71% Training Time |
+| **Device Batch Size** | 64 | 16 | -57.51% Peak GPU Memory |
+| **Learning Rate** | 1e-4 | 1e-2 | +19.83% Val. Semantic Similarity |
+| **Precision** | FP32 | BF16 | +21.35% Profiler Est. Achieved Efficiency |
+| **Evaluation Batch Size** | 1 | 16 | +474.41% Inference Tok/Sec |
 
 **Hardware:** [NVIDIA L4, g2-standard-4 (4 vCPUs, 16 GB Memory), CUDA 12.4, Python 3.10, Pytorch 2.6.0+cu124, M129, Debian 11
 ]
 
-**Headline result (one sentence):** *e.g., "Applying LoRA + 4-bit quantization reduced fine-tuning memory from 38 GB to 9 GB and cut wall-clock training time per epoch by 2.7× on a single A100, with no measurable accuracy degradation on the GLUE benchmark."*
+**Headline result:** Optimizing the Nano-LLaVa pipeline with offline embeddings and AMP-driven batch sizing achieved a 6.15× speedup in total training time and 86% increase in GPU utilization on a single NVIDIA L4, while batched decoding delivered a 5.75× increase in inference throughput.
 
 ---
 
@@ -311,7 +307,7 @@ This project validated the architectural approach of the LLaVa model while provi
 - *Optimization 3 (Batched Decoding):* 5.74x throughput gain at batch size 16, attributable to the parallelization of caption generation.  
 - *Device Batch Size Optimization:* This optimization did not decrease training time or increase throughput due to its accompanying increase in Peak GPU VRAM, which coincided will longer backwards passes. This was potentially due to the larger memory requirements of the activations and cache spilling.
 
-![Baseline vs Optimized latency](plots/BaselineVsOptimizedSummary.png)
+![Baseline vs Optimized latency](plots/BaselineVsOptimizedSummary.jpg)
 
 ---
 
