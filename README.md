@@ -74,8 +74,8 @@ The following files were already part of the orignal nanochat repo and were adap
     - Handles pre-trained weights and my saved weight checkpoints
   - loss_eval.py
     - Calls new forward function with image embeddings
-- **Hardware target:** NVIDIA L4, g2-standard-4 (4 vCPUs, 16 GB Memory)
-
+**Hardware:** [NVIDIA L4, g2-standard-4 (4 vCPUs, 16 GB Memory), CUDA 12.4, Python 3.10, Pytorch 2.6.0+cu124, M129, Debian 11
+]
 ---
 
 ## 3. Final Results Summary
@@ -100,8 +100,6 @@ The following files were already part of the orignal nanochat repo and were adap
 | **Precision** | FP32 | BF16 | +21.35% Profiler Est. Achieved Efficiency |
 | **Evaluation Batch Size** | 1 | 16 | +474.41% Inference Tok/Sec |
 
-**Hardware:** [NVIDIA L4, g2-standard-4 (4 vCPUs, 16 GB Memory), CUDA 12.4, Python 3.10, Pytorch 2.6.0+cu124, M129, Debian 11
-]
 
 **Headline result:** Optimizing the Nano-LLaVa pipeline with offline embeddings and AMP-driven batch sizing achieved a 6.15× speedup in total training time and 86% increase in GPU utilization on a single NVIDIA L4, while batched decoding delivered a 5.75× increase in inference throughput.
 
@@ -119,6 +117,8 @@ The following files were already part of the orignal nanochat repo and were adap
 ├── README.md
 ├── chat_sft_command.txt
 ├── demo_command.txt
+├── deliverables
+├── plots
 ├── nanochat
 │   ├── LICENSE
 │   ├── README.md
