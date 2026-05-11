@@ -15,8 +15,8 @@
 ## Submission
 
 - **GitHub repository:** [https://github.com/AlexanderSwartz/nano-llava](https://github.com/AlexanderSwartz/nano-llava)
-- **Final report:** [`deliverables/HPML_Final_Report.pdf`](deliverables/HPML_Final_Report.pdf)
-- **Final presentation:** [`deliverables/HPML_Final_Presentation.pptx`](deliverables/HPML_Final_Presentation.pptx)
+- **Final report:** [`deliverables/HPML_Final_Report.pdf`](deliverables/Nano-LLaVa_HPML_Final_Report.pdf)
+- **Final presentation:** [`deliverables/HPML_Final_Presentation.pptx`](deliverables/HPML_Final_Project_Presentation_as7629.pptx)
 - **Experiment-tracking dashboard:** [https://wandb.ai/as7629-columbia-university/Multimodal-Nanochat/table?nw=nwuseras7629](https://wandb.ai/as7629-columbia-university/Multimodal-Nanochat/table?nw=nwuseras7629)
 
 ---
