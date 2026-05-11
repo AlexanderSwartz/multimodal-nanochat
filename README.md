@@ -1,4 +1,4 @@
-# HPML Final Project: [Project Title]
+# Nano-LLaVa: Training Pipeline Optimization of LLM Extended for Image Captioning
 
 > **Course:** High Performance Machine Learning
 > **Semester:** Spring 2026
@@ -324,21 +324,17 @@ This project validated the architectural approach of the LLaVa model while provi
 **Did your team use any AI tool in completing this project?**
 
 - [ ] No, we did not use any AI tool.
-- [ ] Yes, we used AI assistance as described below.
+- [x] Yes, we used AI assistance as described below.
 
-**Tool(s) used:** *e.g., ChatGPT, Claude, GitHub Copilot, Cursor*
+**Tool(s) used:** Gemini, Github Copilot
 
-**Specific purpose:** *e.g., debugged a CUDA OOM error, clarified SM occupancy, polished prose in the report's introduction*
+**Specific purpose:** Gemini was used with planning the project and reducing the scope since I am working solo. It helped me decide on the simpler prefix-token strategy instead of cross-attention. It was also used during writing to re-word and give ideas for transitions between sections, as well as planning the overall structure. It was not used to analyzed results or generate full paragraphs.
 
-**Sections affected:** *e.g., src/profile.py setup, README §6 results narrative, report §V Discussion*
+Copilot was used for explaining the existing Nanochat repo and for generating boilerplate code, such as the code for loading images from CLIP or for most of the matplotlib plot generation. For plots, I would specificy the wandb runs and metrics to plot as well as which type of plot. Copilot code attributes are visible in the commit history.
 
-**How we verified correctness:** *e.g., re-ran every reported experiment ourselves; confirmed profiler-trace interpretations against the raw traces in results/; rewrote AI-suggested code in our own words and confirmed it produces the same numbers as the version we hand-wrote.*
+**How we verified correctness:** After AI suggested the simpler prefix-token strategy, I read the LLaVa paper myself to see if it matched with my intended project. For code generation, I ran multiple times after each generated commit to reduce probability of added bugs.
 
 By submitting this project, the team confirms that the analysis, interpretations, and conclusions are our own, and that any AI assistance is fully disclosed above. The same disclosure block appears as an appendix in the final report.
-
-### License
-
-Released under the MIT License. See [`LICENSE`](LICENSE).
 
 ### Citation
 
