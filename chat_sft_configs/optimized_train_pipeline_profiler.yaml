@@ -1,0 +1,23 @@
+# Training Hyperparameters
+train_vision_only: true
+vision_lr: 1e-2
+num_iterations: 30
+total_batch_size: 32768
+device_batch_size: 16
+max_seq_len: 128
+load_optimizer: 0
+
+# Data & Model Pipeline
+train_jsonl: "../COCO_data/coco_train.jsonl"
+val_jsonl: "../COCO_data/coco_val.jsonl"
+pin_memory: true
+
+# Evaluation & Profiling
+eval_every: 15
+eval_tokens: 12800
+# profile is false since the flag wasn't provided, 
+# matching the 'profileFalse' in your run name.
+profile: true
+
+# Logging & Experiment Tracking (Weights & Biases)
+# run: "optimized_offline_pinTrue_profileFalse"
