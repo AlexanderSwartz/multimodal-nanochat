@@ -328,7 +328,7 @@ This project validated the architectural approach of the LLaVa model while provi
 
 **Tool(s) used:** Gemini, Github Copilot
 
-**Specific purpose:** Gemini was used with planning the project and reducing the scope since I am working solo. It helped me decide on the simpler prefix-token strategy instead of cross-attention. It was also used during writing to re-word and give ideas for transitions between sections, as well as planning the overall structure. It was not used to analyzed results or generate full paragraphs.
+**Specific purpose:** Gemini was used with planning the project and reducing the scope since I am working solo. It helped me decide on the simpler prefix-token strategy instead of cross-attention. It was also used during writing to re-word and give ideas for transitions between sections, as well as planning the overall structure. It was not used to analyzed results or generate full paragraphs. It was used extensively setup and debugging of pytorch profiler, uv, GCP, LateX, Tensorboard, and Wandb. 
 
 Copilot was used for explaining the existing Nanochat repo and for generating boilerplate code, such as the code for loading images from CLIP or for most of the matplotlib plot generation. For plots, I would specificy the wandb runs and metrics to plot as well as which type of plot. Copilot code attributes are visible in the commit history.
 
