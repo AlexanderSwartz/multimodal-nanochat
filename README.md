@@ -23,16 +23,12 @@
 
 ## 1. Problem Statement
 
-A 2–4 sentence description of the workload, the system being optimized, and *why* the optimization matters. State whether you are targeting **training**, **inference**, or **both**, and identify the bottleneck (compute, memory bandwidth, I/O, communication, etc.) you set out to address.
-
 This project seeks to optimize the training pipeling of an LLM extended for image captioning. The goal is to leverage a pre-trained vision encoder and pre-trained LLM, optimizing a minimal projection layer between them. Optimizations mainly focused on the training pipeline (dataloading, mixed precision, batching), while minor inference optimizations and hyperparameter tuning were also conducted. 
 
 
 ---
 
 ## 2. Model/Application Description
-
-Briefly describe the model(s) and stack you used:
 
 - **Model architecture:**
 	- **CLIP Vision Encoder**
